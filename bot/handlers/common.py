@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bot.db import models
 from bot.handlers.registration import start_register_flow
-from bot.keyboards.common import main_menu
+from bot.keyboards.common import main_menu, main_menu_reply
 
 router = Router()
 
@@ -23,6 +23,10 @@ async def start_command(message: Message, state: FSMContext) -> None:
         return
     await message.answer(
         "Привет! Это бот клана Clash of Clans. Используйте /register для регистрации.",
+        reply_markup=main_menu_reply(),
+    )
+    await message.answer(
+        "Быстрые действия доступны кнопками ниже.",
         reply_markup=main_menu(),
     )
 
@@ -36,7 +40,10 @@ async def me_command(message: Message, sessionmaker: async_sessionmaker) -> None
     if not user:
         await message.answer("Вы не зарегистрированы. Используйте /register.")
         return
-    await message.answer(f"Вы связаны с {user.player_name} ({user.player_tag})")
+    await message.answer(
+        f"Вы связаны с {user.player_name} ({user.player_tag})",
+        reply_markup=main_menu_reply(),
+    )
 
 
 @router.message(Command("whois"))
@@ -66,7 +73,10 @@ async def whois_command(message: Message, sessionmaker: async_sessionmaker) -> N
         await message.answer("Нет данных по этому пользователю.")
         return
     label = target_user.full_name if target_user else f"@{username}"
-    await message.answer(f"{label}: {user.player_name} ({user.player_tag})")
+    await message.answer(
+        f"{label}: {user.player_name} ({user.player_tag})",
+        reply_markup=main_menu_reply(),
+    )
 
 
 @router.callback_query()

@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bot.db import models
+from bot.keyboards.common import main_menu_reply
 from bot.keyboards.notify import notify_channel_kb
 
 router = Router()
@@ -33,7 +34,10 @@ async def notify_command(message: Message, sessionmaker: async_sessionmaker) -> 
         try:
             times = _parse_times(times_raw)
         except ValueError:
-            await message.answer("Формат времени: /notify 09:00 или /notify 09:00,18:00")
+            await message.answer(
+                "Формат времени: /notify 09:00 или /notify 09:00,18:00",
+                reply_markup=main_menu_reply(),
+            )
             return
         async with sessionmaker() as session:
             user = (
@@ -42,16 +46,19 @@ async def notify_command(message: Message, sessionmaker: async_sessionmaker) -> 
                 )
             ).scalar_one_or_none()
             if not user:
-                await message.answer("Сначала зарегистрируйтесь /register")
+                await message.answer("Сначала зарегистрируйтесь /register", reply_markup=main_menu_reply())
                 return
             prefs = dict(user.notify_pref or {})
             prefs["times"] = times
             user.notify_pref = prefs
             await session.commit()
-        await message.answer("Время уведомлений сохранено.")
+        await message.answer("Время уведомлений сохранено.", reply_markup=main_menu_reply())
         return
 
-    await message.answer("Куда отправлять уведомления?", reply_markup=notify_channel_kb())
+    await message.answer(
+        "Куда отправлять уведомления?",
+        reply_markup=notify_channel_kb(),
+    )
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("notify:"))
@@ -64,12 +71,12 @@ async def notify_callback(callback: CallbackQuery, sessionmaker: async_sessionma
             )
         ).scalar_one_or_none()
         if not user:
-            await callback.message.answer("Сначала зарегистрируйтесь /register")
+            await callback.message.answer("Сначала зарегистрируйтесь /register", reply_markup=main_menu_reply())
             await callback.answer()
             return
         prefs = dict(user.notify_pref or {})
         prefs["channel"] = channel
         user.notify_pref = prefs
         await session.commit()
-    await callback.message.answer("Настройки уведомлений сохранены.")
+    await callback.message.answer("Настройки уведомлений сохранены.", reply_markup=main_menu_reply())
     await callback.answer()

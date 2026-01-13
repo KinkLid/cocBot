@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bot.config import BotConfig
 from bot.db import models
+from bot.keyboards.common import main_menu_reply
 from bot.keyboards.seasons import seasons_kb
 from bot.services.permissions import is_admin
 
@@ -24,16 +25,20 @@ async def mystats_command(message: Message, sessionmaker: async_sessionmaker) ->
         await message.answer("Вы не зарегистрированы.")
         return
     await message.answer(
-        "Статистика доступна: войны, звезды, участие в рейдах. Периоды: всё время/сезон."
+        "Статистика доступна: войны, звезды, участие в рейдах. Периоды: всё время/сезон.",
+        reply_markup=main_menu_reply(),
     )
 
 
 @router.message(Command("stats"))
 async def stats_command(message: Message, config: BotConfig) -> None:
     if not is_admin(message.from_user.id, config):
-        await message.answer("Недостаточно прав.")
+        await message.answer("Недостаточно прав.", reply_markup=main_menu_reply())
         return
-    await message.answer("Админская статистика: используйте @username или player_tag.")
+    await message.answer(
+        "Админская статистика: используйте @username или player_tag.",
+        reply_markup=main_menu_reply(),
+    )
 
 
 @router.message(Command("season"))
@@ -43,7 +48,7 @@ async def season_command(message: Message, sessionmaker: async_sessionmaker) -> 
             await session.execute(select(models.Season.id, models.Season.name).order_by(models.Season.end_at.desc()))
         ).all()
     if not seasons:
-        await message.answer("Сезоны ещё не сформированы.")
+        await message.answer("Сезоны ещё не сформированы.", reply_markup=main_menu_reply())
         return
     await message.answer("Выберите сезон:", reply_markup=seasons_kb(seasons))
 
@@ -51,5 +56,8 @@ async def season_command(message: Message, sessionmaker: async_sessionmaker) -> 
 @router.callback_query(lambda c: c.data and c.data.startswith("season:"))
 async def season_callback(callback: CallbackQuery) -> None:
     season_id = int(callback.data.split(":", 1)[1])
-    await callback.message.answer(f"Сезон выбран: {season_id}. Используйте /mystats для просмотра.")
+    await callback.message.answer(
+        f"Сезон выбран: {season_id}. Используйте /mystats для просмотра.",
+        reply_markup=main_menu_reply(),
+    )
     await callback.answer()

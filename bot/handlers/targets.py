@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bot.config import BotConfig
 from bot.db import models
+from bot.keyboards.common import main_menu_reply
 from bot.keyboards.targets import targets_kb
 from bot.services.coc_client import CocClient
 from bot.services.permissions import is_admin
@@ -30,16 +31,16 @@ async def targets_command(
         war = await coc_client.get_current_war(config.clan_tag)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to fetch war: %s", exc)
-        await message.answer("Не удалось получить войну.")
+        await message.answer("Не удалось получить войну.", reply_markup=main_menu_reply())
         return
 
     if war.get("state") != "preparation":
-        await message.answer("Выбор целей доступен только в подготовке.")
+        await message.answer("Выбор целей доступен только в подготовке.", reply_markup=main_menu_reply())
         return
 
     enemies = war.get("opponent", {}).get("members", [])
     if not enemies:
-        await message.answer("Нет списка противников.")
+        await message.answer("Нет списка противников.", reply_markup=main_menu_reply())
         return
 
     async with sessionmaker() as session:
@@ -76,12 +77,12 @@ async def target_claim(
         war = await coc_client.get_current_war(config.clan_tag)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to fetch war: %s", exc)
-        await callback.message.answer("Не удалось получить войну.")
+        await callback.message.answer("Не удалось получить войну.", reply_markup=main_menu_reply())
         await callback.answer()
         return
 
     if war.get("state") != "preparation":
-        await callback.message.answer("Выбор целей доступен только в подготовке.")
+        await callback.message.answer("Выбор целей доступен только в подготовке.", reply_markup=main_menu_reply())
         await callback.answer()
         return
 
@@ -111,11 +112,14 @@ async def target_claim(
                     )
                 )
         except IntegrityError:
-            await callback.message.answer("Цель уже занята.")
+            await callback.message.answer("Цель уже занята.", reply_markup=main_menu_reply())
             await callback.answer()
             return
 
-    await callback.message.answer(f"Цель #{position} закреплена за вами.")
+    await callback.message.answer(
+        f"Цель #{position} закреплена за вами.",
+        reply_markup=main_menu_reply(),
+    )
     await callback.answer()
 
 
@@ -127,7 +131,7 @@ async def unclaim_command(
 ) -> None:
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
-        await message.answer("Укажите номер цели: /unclaim 5")
+        await message.answer("Укажите номер цели: /unclaim 5", reply_markup=main_menu_reply())
         return
     position = int(parts[1])
     async with sessionmaker() as session:
@@ -137,13 +141,13 @@ async def unclaim_command(
             )
         ).scalar_one_or_none()
         if not claim:
-            await message.answer("Эта цель не занята.")
+            await message.answer("Эта цель не занята.", reply_markup=main_menu_reply())
             return
         if claim.claimed_by_telegram_id != message.from_user.id and not is_admin(
             message.from_user.id, config
         ):
-            await message.answer("Вы не можете снять чужую цель.")
+            await message.answer("Вы не можете снять чужую цель.", reply_markup=main_menu_reply())
             return
         await session.delete(claim)
         await session.commit()
-    await message.answer("Цель освобождена.")
+    await message.answer("Цель освобождена.", reply_markup=main_menu_reply())

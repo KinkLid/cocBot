@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bot.config import BotConfig
 from bot.db import models
+from bot.keyboards.common import main_menu_reply
 from bot.services.permissions import is_admin
 
 router = Router()
@@ -16,11 +17,11 @@ router = Router()
 @router.message(Command("wipe"))
 async def wipe_command(message: Message, config: BotConfig, sessionmaker: async_sessionmaker) -> None:
     if not is_admin(message.from_user.id, config):
-        await message.answer("Недостаточно прав.")
+        await message.answer("Недостаточно прав.", reply_markup=main_menu_reply())
         return
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
-        await message.answer("Укажите @username или player_tag.")
+        await message.answer("Укажите @username или player_tag.", reply_markup=main_menu_reply())
         return
     target = parts[1]
 
@@ -36,7 +37,7 @@ async def wipe_command(message: Message, config: BotConfig, sessionmaker: async_
                 await session.execute(select(models.User).where(models.User.player_tag == target))
             ).scalar_one_or_none()
         if not user:
-            await message.answer("Пользователь не найден.")
+            await message.answer("Пользователь не найден.", reply_markup=main_menu_reply())
             return
         await session.execute(delete(models.TargetClaim).where(models.TargetClaim.claimed_by_telegram_id == user.telegram_id))
         await session.execute(delete(models.WarParticipation).where(models.WarParticipation.telegram_id == user.telegram_id))
@@ -44,4 +45,4 @@ async def wipe_command(message: Message, config: BotConfig, sessionmaker: async_
         await session.execute(delete(models.StatsDaily).where(models.StatsDaily.telegram_id == user.telegram_id))
         await session.delete(user)
         await session.commit()
-    await message.answer("Данные пользователя удалены.")
+    await message.answer("Данные пользователя удалены.", reply_markup=main_menu_reply())
