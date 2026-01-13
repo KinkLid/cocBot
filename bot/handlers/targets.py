@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import logging
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -15,6 +16,7 @@ from bot.keyboards.common import main_menu_reply
 from bot.keyboards.targets import targets_kb
 from bot.services.coc_client import CocClient
 from bot.services.permissions import is_admin
+from bot.utils.state import reset_state_if_any
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -23,24 +25,35 @@ router = Router()
 @router.message(Command("targets"))
 async def targets_command(
     message: Message,
+    state: FSMContext,
     config: BotConfig,
     coc_client: CocClient,
     sessionmaker: async_sessionmaker,
 ) -> None:
+    await reset_state_if_any(state)
     try:
         war = await coc_client.get_current_war(config.clan_tag)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to fetch war: %s", exc)
-        await message.answer("Не удалось получить войну.", reply_markup=main_menu_reply())
+        await message.answer(
+            "Не удалось получить войну.",
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        )
         return
 
     if war.get("state") != "preparation":
-        await message.answer("Выбор целей доступен только в подготовке.", reply_markup=main_menu_reply())
+        await message.answer(
+            "Выбор целей доступен только в подготовке.",
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        )
         return
 
     enemies = war.get("opponent", {}).get("members", [])
     if not enemies:
-        await message.answer("Нет списка противников.", reply_markup=main_menu_reply())
+        await message.answer(
+            "Нет списка противников.",
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        )
         return
 
     async with sessionmaker() as session:
@@ -77,12 +90,18 @@ async def target_claim(
         war = await coc_client.get_current_war(config.clan_tag)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to fetch war: %s", exc)
-        await callback.message.answer("Не удалось получить войну.", reply_markup=main_menu_reply())
+        await callback.message.answer(
+            "Не удалось получить войну.",
+            reply_markup=main_menu_reply(is_admin(callback.from_user.id, config)),
+        )
         await callback.answer()
         return
 
     if war.get("state") != "preparation":
-        await callback.message.answer("Выбор целей доступен только в подготовке.", reply_markup=main_menu_reply())
+        await callback.message.answer(
+            "Выбор целей доступен только в подготовке.",
+            reply_markup=main_menu_reply(is_admin(callback.from_user.id, config)),
+        )
         await callback.answer()
         return
 
@@ -112,13 +131,16 @@ async def target_claim(
                     )
                 )
         except IntegrityError:
-            await callback.message.answer("Цель уже занята.", reply_markup=main_menu_reply())
+            await callback.message.answer(
+                "Цель уже занята.",
+                reply_markup=main_menu_reply(is_admin(callback.from_user.id, config)),
+            )
             await callback.answer()
             return
 
     await callback.message.answer(
         f"Цель #{position} закреплена за вами.",
-        reply_markup=main_menu_reply(),
+        reply_markup=main_menu_reply(is_admin(callback.from_user.id, config)),
     )
     await callback.answer()
 
@@ -126,12 +148,17 @@ async def target_claim(
 @router.message(Command("unclaim"))
 async def unclaim_command(
     message: Message,
+    state: FSMContext,
     config: BotConfig,
     sessionmaker: async_sessionmaker,
 ) -> None:
+    await reset_state_if_any(state)
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
-        await message.answer("Укажите номер цели: /unclaim 5", reply_markup=main_menu_reply())
+        await message.answer(
+            "Укажите номер цели: /unclaim 5",
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        )
         return
     position = int(parts[1])
     async with sessionmaker() as session:
@@ -141,13 +168,33 @@ async def unclaim_command(
             )
         ).scalar_one_or_none()
         if not claim:
-            await message.answer("Эта цель не занята.", reply_markup=main_menu_reply())
+            await message.answer(
+                "Эта цель не занята.",
+                reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+            )
             return
         if claim.claimed_by_telegram_id != message.from_user.id and not is_admin(
             message.from_user.id, config
         ):
-            await message.answer("Вы не можете снять чужую цель.", reply_markup=main_menu_reply())
+            await message.answer(
+                "Вы не можете снять чужую цель.",
+                reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+            )
             return
         await session.delete(claim)
         await session.commit()
-    await message.answer("Цель освобождена.", reply_markup=main_menu_reply())
+    await message.answer(
+        "Цель освобождена.",
+        reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+    )
+
+
+@router.message(F.text == "Цели на войне")
+async def targets_button(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    coc_client: CocClient,
+    sessionmaker: async_sessionmaker,
+) -> None:
+    await targets_command(message, state, config, coc_client, sessionmaker)
