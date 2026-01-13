@@ -4,6 +4,7 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bot.config import BotConfig
 from bot.db import models
@@ -13,8 +14,7 @@ router = Router()
 
 
 @router.message(Command("wipe"))
-async def wipe_command(message: Message) -> None:
-    config: BotConfig = message.bot["config"]
+async def wipe_command(message: Message, config: BotConfig, sessionmaker: async_sessionmaker) -> None:
     if not is_admin(message.from_user.id, config):
         await message.answer("Недостаточно прав.")
         return
@@ -24,7 +24,6 @@ async def wipe_command(message: Message) -> None:
         return
     target = parts[1]
 
-    sessionmaker = message.bot["sessionmaker"]
     async with sessionmaker() as session:
         if target.startswith("@"):
             user = (

@@ -6,6 +6,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bot.db import models
 from bot.handlers.registration import start_register_flow
@@ -27,8 +28,7 @@ async def start_command(message: Message, state: FSMContext) -> None:
 
 
 @router.message(Command("me"))
-async def me_command(message: Message) -> None:
-    sessionmaker = message.bot["sessionmaker"]
+async def me_command(message: Message, sessionmaker: async_sessionmaker) -> None:
     async with sessionmaker() as session:
         user = (
             await session.execute(select(models.User).where(models.User.telegram_id == message.from_user.id))
@@ -40,7 +40,7 @@ async def me_command(message: Message) -> None:
 
 
 @router.message(Command("whois"))
-async def whois_command(message: Message) -> None:
+async def whois_command(message: Message, sessionmaker: async_sessionmaker) -> None:
     target_user = message.reply_to_message.from_user if message.reply_to_message else None
     username = None
     if target_user is None and message.text:
@@ -51,7 +51,6 @@ async def whois_command(message: Message) -> None:
         await message.answer("Ответьте на сообщение пользователя или укажите @username.")
         return
 
-    sessionmaker = message.bot["sessionmaker"]
     async with sessionmaker() as session:
         if target_user:
             user = (
@@ -71,11 +70,15 @@ async def whois_command(message: Message) -> None:
 
 
 @router.callback_query()
-async def menu_callbacks(callback: CallbackQuery, state: FSMContext) -> None:
+async def menu_callbacks(
+    callback: CallbackQuery,
+    state: FSMContext,
+    sessionmaker: async_sessionmaker,
+) -> None:
     if callback.data == "menu:register":
         await start_register_flow(callback.message, state)
     elif callback.data == "menu:me":
-        await me_command(callback.message)
+        await me_command(callback.message, sessionmaker)
     elif callback.data == "menu:mystats":
         await callback.message.answer("Используйте /mystats для статистики.")
     elif callback.data == "menu:notify":

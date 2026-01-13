@@ -4,6 +4,7 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bot.config import BotConfig
 from bot.db import models
@@ -14,8 +15,7 @@ router = Router()
 
 
 @router.message(Command("mystats"))
-async def mystats_command(message: Message) -> None:
-    sessionmaker = message.bot["sessionmaker"]
+async def mystats_command(message: Message, sessionmaker: async_sessionmaker) -> None:
     async with sessionmaker() as session:
         user = (
             await session.execute(select(models.User).where(models.User.telegram_id == message.from_user.id))
@@ -29,8 +29,7 @@ async def mystats_command(message: Message) -> None:
 
 
 @router.message(Command("stats"))
-async def stats_command(message: Message) -> None:
-    config: BotConfig = message.bot["config"]
+async def stats_command(message: Message, config: BotConfig) -> None:
     if not is_admin(message.from_user.id, config):
         await message.answer("Недостаточно прав.")
         return
@@ -38,8 +37,7 @@ async def stats_command(message: Message) -> None:
 
 
 @router.message(Command("season"))
-async def season_command(message: Message) -> None:
-    sessionmaker = message.bot["sessionmaker"]
+async def season_command(message: Message, sessionmaker: async_sessionmaker) -> None:
     async with sessionmaker() as session:
         seasons = (
             await session.execute(select(models.Season.id, models.Season.name).order_by(models.Season.end_at.desc()))

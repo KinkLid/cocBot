@@ -7,6 +7,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bot.config import BotConfig
 from bot.db import models
@@ -19,12 +20,14 @@ router = Router()
 
 
 @router.message(Command("targets"))
-async def targets_command(message: Message) -> None:
-    config: BotConfig = message.bot["config"]
-    coc: CocClient = message.bot["coc_client"]
-
+async def targets_command(
+    message: Message,
+    config: BotConfig,
+    coc_client: CocClient,
+    sessionmaker: async_sessionmaker,
+) -> None:
     try:
-        war = await coc.get_current_war(config.clan_tag)
+        war = await coc_client.get_current_war(config.clan_tag)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to fetch war: %s", exc)
         await message.answer("Не удалось получить войну.")
@@ -39,7 +42,6 @@ async def targets_command(message: Message) -> None:
         await message.answer("Нет списка противников.")
         return
 
-    sessionmaker = message.bot["sessionmaker"]
     async with sessionmaker() as session:
         war_tag = war.get("tag") or war.get("clan", {}).get("tag")
         existing = None
@@ -62,13 +64,16 @@ async def targets_command(message: Message) -> None:
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("target:"))
-async def target_claim(callback: CallbackQuery) -> None:
+async def target_claim(
+    callback: CallbackQuery,
+    config: BotConfig,
+    coc_client: CocClient,
+    sessionmaker: async_sessionmaker,
+) -> None:
     position = int(callback.data.split(":", 1)[1])
-    config: BotConfig = callback.message.bot["config"]
-    coc: CocClient = callback.message.bot["coc_client"]
 
     try:
-        war = await coc.get_current_war(config.clan_tag)
+        war = await coc_client.get_current_war(config.clan_tag)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to fetch war: %s", exc)
         await callback.message.answer("Не удалось получить войну.")
@@ -80,7 +85,6 @@ async def target_claim(callback: CallbackQuery) -> None:
         await callback.answer()
         return
 
-    sessionmaker = callback.message.bot["sessionmaker"]
     async with sessionmaker() as session:
         war_tag = war.get("tag") or war.get("clan", {}).get("tag")
         war_row = (
@@ -116,14 +120,16 @@ async def target_claim(callback: CallbackQuery) -> None:
 
 
 @router.message(Command("unclaim"))
-async def unclaim_command(message: Message) -> None:
+async def unclaim_command(
+    message: Message,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+) -> None:
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
         await message.answer("Укажите номер цели: /unclaim 5")
         return
     position = int(parts[1])
-    sessionmaker = message.bot["sessionmaker"]
-    config: BotConfig = message.bot["config"]
     async with sessionmaker() as session:
         claim = (
             await session.execute(

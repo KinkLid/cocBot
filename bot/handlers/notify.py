@@ -6,6 +6,7 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bot.db import models
 from bot.keyboards.notify import notify_channel_kb
@@ -26,7 +27,7 @@ def _parse_times(raw: str) -> list[str]:
 
 
 @router.message(Command("notify"))
-async def notify_command(message: Message) -> None:
+async def notify_command(message: Message, sessionmaker: async_sessionmaker) -> None:
     if message.text and len(message.text.split(maxsplit=1)) > 1:
         times_raw = message.text.split(maxsplit=1)[1]
         try:
@@ -34,7 +35,6 @@ async def notify_command(message: Message) -> None:
         except ValueError:
             await message.answer("Формат времени: /notify 09:00 или /notify 09:00,18:00")
             return
-        sessionmaker = message.bot["sessionmaker"]
         async with sessionmaker() as session:
             user = (
                 await session.execute(
@@ -55,9 +55,8 @@ async def notify_command(message: Message) -> None:
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("notify:"))
-async def notify_callback(callback: CallbackQuery) -> None:
+async def notify_callback(callback: CallbackQuery, sessionmaker: async_sessionmaker) -> None:
     channel = callback.data.split(":", 1)[1]
-    sessionmaker = callback.message.bot["sessionmaker"]
     async with sessionmaker() as session:
         user = (
             await session.execute(

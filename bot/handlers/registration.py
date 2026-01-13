@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
-from aiogram import F, Router
+from aiogram import Router
 from aiogram.enums import ChatType
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bot.config import BotConfig
 from bot.db import models
@@ -34,8 +34,7 @@ async def _ensure_private(message: Message, bot_username: str) -> bool:
 
 
 @router.message(Command("register"))
-async def register_command(message: Message, state: FSMContext) -> None:
-    bot_username = message.bot["bot_username"]
+async def register_command(message: Message, state: FSMContext, bot_username: str) -> None:
     if not await _ensure_private(message, bot_username):
         return
     await state.clear()
@@ -55,7 +54,13 @@ async def register_tag(message: Message, state: FSMContext) -> None:
 
 
 @router.message(RegisterState.waiting_token)
-async def register_token(message: Message, state: FSMContext) -> None:
+async def register_token(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    coc_client: CocClient,
+    sessionmaker: async_sessionmaker,
+) -> None:
     token = (message.text or "").strip()
     data = await state.get_data()
     player_tag = data.get("player_tag")
@@ -64,11 +69,8 @@ async def register_token(message: Message, state: FSMContext) -> None:
         await message.answer("Что-то пошло не так. Начните /register заново.")
         return
 
-    config: BotConfig = message.bot["config"]
-    coc: CocClient = message.bot["coc_client"]
-
     try:
-        verified = await coc.verify_token(player_tag, token)
+        verified = await coc_client.verify_token(player_tag, token)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Verify token failed: %s", exc)
         await message.answer("Не удалось проверить токен. Попробуйте позже.")
@@ -79,7 +81,7 @@ async def register_token(message: Message, state: FSMContext) -> None:
         return
 
     try:
-        player_data = await coc.get_player(player_tag)
+        player_data = await coc_client.get_player(player_tag)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Fetch player failed: %s", exc)
         await message.answer("Не удалось получить профиль игрока.")
@@ -90,7 +92,6 @@ async def register_token(message: Message, state: FSMContext) -> None:
         await message.answer("Игрок не состоит в этом клане.")
         return
 
-    sessionmaker = message.bot["sessionmaker"]
     async with sessionmaker() as session:
         existing = (
             await session.execute(select(models.User).where(models.User.telegram_id == message.from_user.id))

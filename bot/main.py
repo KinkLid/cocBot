@@ -35,12 +35,12 @@ async def main() -> None:
     stats_collector = StatsCollector(sessionmaker, coc_client, config.clan_tag)
     scheduler = configure_scheduler(stats_collector)
 
-    bot["config"] = config
-    bot["sessionmaker"] = sessionmaker
-    bot["coc_client"] = coc_client
+    dp["config"] = config
+    dp["sessionmaker"] = sessionmaker
+    dp["coc_client"] = coc_client
 
     me = await bot.get_me()
-    bot["bot_username"] = me.username
+    dp["bot_username"] = me.username
 
     dp.include_router(common.router)
     dp.include_router(registration.router)
