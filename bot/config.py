@@ -38,7 +38,7 @@ def load_config() -> BotConfig:
     clan_tag = env.get("CLAN_TAG", data.get("clan_tag"))
     main_chat_id = env.get("MAIN_CHAT_ID", data.get("main_chat_id"))
     admin_ids = env.get("ADMIN_TELEGRAM_IDS", data.get("admin_telegram_ids", []))
-    timezone = env.get("TIMEZONE", data.get("timezone", "Europe/Riga"))
+    timezone = env.get("TIMEZONE", data.get("timezone", "Europe/Moscow"))
     database_url = env.get("DATABASE_URL", data.get("database_url"))
     log_level = env.get("LOG_LEVEL", data.get("log_level", "INFO"))
     default_notify_channel = env.get(

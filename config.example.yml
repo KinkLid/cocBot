@@ -1,10 +1,11 @@
-bot_token: "8405948402:AAH5_XJURSjoztQcpwfgTcWqKhdbn-jYyz8"
-coc_api_token: "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiIsImtpZCI6IjI4YTMxOGY3LTAwMDAtYTFlYi03ZmExLTJjNzQzM2M2Y2NhNSJ9.eyJpc3MiOiJzdXBlcmNlbGwiLCJhdWQiOiJzdXBlcmNlbGw6Z2FtZWFwaSIsImp0aSI6IjUwNGMyNDc5LWM1YWUtNDhjMy1hMGZjLTVhOGJkZTVkM2JhYiIsImlhdCI6MTc2ODMxNzQ0Miwic3ViIjoiZGV2ZWxvcGVyLzQ1NmMxMWY3LTIwYmItM2I2Ni1lZTRlLTZmMmU3MjlhZDAyZCIsInNjb3BlcyI6WyJjbGFzaCJdLCJsaW1pdHMiOlt7InRpZXIiOiJkZXZlbG9wZXIvc2lsdmVyIiwidHlwZSI6InRocm90dGxpbmcifSx7ImNpZHJzIjpbIjkwLjE1Ni4yNTQuOTciXSwidHlwZSI6ImNsaWVudCJ9XX0.5Vf7RqIDfUzAF-i5Ixweq2qbWmi_Uoast-0lyZWWRdGsVhzFKGSFw-nh23oH8pieQCuRBV1CW0XkUaBI0mbz3Q"
-clan_tag: "#2YCYJ9CQQ"
-main_chat_id: -1003303283869
+bot_token: "telegram-bot-token"
+coc_api_token: "clash-api-token"
+clan_tag: "#ABC123"
+main_chat_id: -1001234567890
 admin_telegram_ids:
-  - 969621591
-timezone: "Russia/Moscow"
+  - 123456789
+  - 987654321
+timezone: "Europe/Moscow"
 database_url: "postgresql+asyncpg://cocbot:cocbot@db:5432/cocbot"
 log_level: "INFO"
 default_notify_channel: "dm"
