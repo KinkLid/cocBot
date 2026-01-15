@@ -13,5 +13,7 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY bot /app/bot
 COPY alembic.ini /app/alembic.ini
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
-CMD ["python", "-m", "bot.main"]
+CMD ["/app/entrypoint.sh"]
