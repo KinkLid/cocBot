@@ -77,7 +77,6 @@ def targets_menu_reply() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="Выбрать противника"), KeyboardButton(text="Таблица целей")],
-            [KeyboardButton(text="Обновить таблицу")],
             [KeyboardButton(text="Главное меню")],
         ],
         resize_keyboard=True,
@@ -88,7 +87,7 @@ def targets_admin_reply() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="Выбрать противника"), KeyboardButton(text="Таблица целей")],
-            [KeyboardButton(text="Обновить таблицу"), KeyboardButton(text="Назначить другому")],
+            [KeyboardButton(text="Назначить другому")],
             [KeyboardButton(text="Главное меню")],
         ],
         resize_keyboard=True,

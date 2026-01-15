@@ -7,6 +7,7 @@ from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramFor
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.enums import ParseMode
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -30,6 +31,10 @@ class TargetsState(StatesGroup):
 
 def _menu_reply(config: BotConfig, telegram_id: int):
     return targets_admin_reply() if is_admin(telegram_id, config) else targets_menu_reply()
+
+
+def _sorted_enemies(enemies: list[dict]) -> list[dict]:
+    return sorted(enemies, key=lambda enemy: enemy.get("mapPosition") or 0)
 
 
 async def _load_war(coc_client: CocClient, clan_tag: str) -> dict | None:
@@ -82,41 +87,139 @@ async def _load_claims(sessionmaker: async_sessionmaker, war_id: int) -> list[mo
         ).scalars().all()
 
 
-async def _build_table(
+def _safe_text(value: str | None) -> str:
+    if not value:
+        return "?"
+    return (
+        value.replace("`", "'")
+        .replace("\n", " ")
+        .replace("|", "/")
+        .strip()
+    )
+
+
+def _truncate(value: str, max_len: int) -> str:
+    if len(value) <= max_len:
+        return value
+    if max_len <= 1:
+        return value[:max_len]
+    return f"{value[: max_len - 1]}…"
+
+
+def _build_table_lines(
     enemies: list[dict],
     claims: list[models.TargetClaim],
-    sessionmaker: async_sessionmaker,
-) -> str:
+    user_map: dict[int, models.User],
+) -> list[str]:
     claims_map = {claim.enemy_position: claim for claim in claims}
-    async with sessionmaker() as session:
-        users = (await session.execute(select(models.User))).scalars().all()
-    user_map = {user.telegram_id: user for user in users}
-
-    lines = ["Таблица целей"]
-    for enemy in enemies:
-        pos = enemy.get("mapPosition")
-        name = enemy.get("name") or "?"
+    rows: list[tuple[str, str, str, str]] = []
+    for enemy in _sorted_enemies(enemies):
+        pos = str(enemy.get("mapPosition") or "?")
+        name = _safe_text(enemy.get("name"))
         th = enemy.get("townhallLevel")
-        base = f"#{pos} {name} TH{th}" if th else f"#{pos} {name}"
-        claim = claims_map.get(pos)
+        enemy_label = f"{name} TH{th}" if th else name
+        claim = claims_map.get(enemy.get("mapPosition"))
         if not claim:
-            lines.append(f"{base} — свободно")
+            rows.append((pos, enemy_label, "свободно", "-"))
             continue
         if claim.external_player_name:
-            holder = claim.external_player_name
+            holder = _safe_text(claim.external_player_name)
         elif claim.claimed_by_telegram_id:
             user = user_map.get(claim.claimed_by_telegram_id)
             if user:
                 tg_name = f"@{user.username}" if user.username else user.player_name
-                holder = f"{tg_name} / {user.player_name}"
+                holder = _safe_text(f"{tg_name} / {user.player_name}")
             else:
                 holder = "участник"
         else:
             holder = "участник"
-        lines.append(f"{base} — занято: {holder}")
+        rows.append((pos, enemy_label, "занято", holder))
+
+    if not rows:
+        return ["Нет противников для отображения."]
+
+    headers = ("№", "Противник", "Статус", "Кем занято")
+    widths = [
+        max(len(headers[0]), max(len(row[0]) for row in rows)),
+        max(len(headers[1]), max(len(row[1]) for row in rows)),
+        max(len(headers[2]), max(len(row[2]) for row in rows)),
+        max(len(headers[3]), max(len(row[3]) for row in rows)),
+    ]
+    max_widths = [4, 22, 10, 22]
+    widths = [min(widths[index], max_widths[index]) for index in range(len(widths))]
+
+    lines = [
+        "Таблица целей",
+        "",
+        " | ".join(
+            [
+                headers[0].ljust(widths[0]),
+                headers[1].ljust(widths[1]),
+                headers[2].ljust(widths[2]),
+                headers[3].ljust(widths[3]),
+            ]
+        ),
+        "-+-".join(["-" * width for width in widths]),
+    ]
+    for row in rows:
+        lines.append(
+            " | ".join(
+                [
+                    _truncate(row[0], widths[0]).ljust(widths[0]),
+                    _truncate(row[1], widths[1]).ljust(widths[1]),
+                    _truncate(row[2], widths[2]).ljust(widths[2]),
+                    _truncate(row[3], widths[3]).ljust(widths[3]),
+                ]
+            )
+        )
     lines.append("")
     lines.append("Флажки в игре API не предоставляет.")
-    return "\n".join(lines)
+    return lines
+
+
+def _chunk_lines(lines: list[str], max_chars: int = 3400) -> list[list[str]]:
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    current_len = 0
+    for line in lines:
+        line_len = len(line) + 1
+        if current and current_len + line_len > max_chars:
+            chunks.append(current)
+            current = []
+            current_len = 0
+        current.append(line)
+        current_len += line_len
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+async def _build_table_messages(
+    enemies: list[dict],
+    claims: list[models.TargetClaim],
+    sessionmaker: async_sessionmaker,
+) -> list[str]:
+    async with sessionmaker() as session:
+        users = (await session.execute(select(models.User))).scalars().all()
+    user_map = {user.telegram_id: user for user in users}
+    lines = _build_table_lines(enemies, claims, user_map)
+    if lines and lines[0].startswith("Нет"):
+        return ["\n".join(lines)]
+
+    header_lines = lines[:4]
+    footer_lines = lines[-2:]
+    data_lines = lines[4:-2]
+    chunks: list[list[str]] = []
+    if not data_lines:
+        chunks = [lines]
+    else:
+        data_chunks = _chunk_lines(data_lines)
+        for index, chunk in enumerate(data_chunks):
+            combined = [*header_lines, *chunk]
+            if index == len(data_chunks) - 1:
+                combined.extend(footer_lines)
+            chunks.append(combined)
+    return ["\n".join(chunk) for chunk in chunks]
 
 
 async def _show_selection(
@@ -127,7 +230,7 @@ async def _show_selection(
     user_id: int,
     admin_mode: bool,
 ) -> None:
-    enemies = war.get("opponent", {}).get("members", [])
+    enemies = _sorted_enemies(war.get("opponent", {}).get("members", []))
     claims = await _load_claims(sessionmaker, war_row.id)
     taken = {claim.enemy_position for claim in claims if claim.claimed_by_telegram_id != user_id}
     my_claims = {claim.enemy_position for claim in claims if claim.claimed_by_telegram_id == user_id}
@@ -191,7 +294,7 @@ async def targets_select_button(
             reply_markup=_menu_reply(config, message.from_user.id),
         )
         return
-    enemies = war.get("opponent", {}).get("members", [])
+    enemies = _sorted_enemies(war.get("opponent", {}).get("members", []))
     if not enemies:
         await message.answer("Нет списка противников.", reply_markup=_menu_reply(config, message.from_user.id))
         return
@@ -206,7 +309,7 @@ async def targets_select_button(
     )
 
 
-@router.message(F.text.in_({"Таблица целей", "Обновить таблицу"}))
+@router.message(F.text == "Таблица целей")
 async def targets_table_button(
     message: Message,
     state: FSMContext,
@@ -219,31 +322,28 @@ async def targets_table_button(
     if not war:
         await message.answer("Не удалось получить войну.", reply_markup=_menu_reply(config, message.from_user.id))
         return
-    enemies = war.get("opponent", {}).get("members", [])
+    enemies = _sorted_enemies(war.get("opponent", {}).get("members", []))
     if not enemies:
         await message.answer("Нет списка противников.", reply_markup=_menu_reply(config, message.from_user.id))
         return
     war_row = await _ensure_war_row(sessionmaker, war)
     claims = await _load_claims(sessionmaker, war_row.id)
-    table_text = await _build_table(enemies, claims, sessionmaker)
-    try:
-        await message.answer(
-            table_text,
-            reply_markup=_menu_reply(config, message.from_user.id),
-        )
-    except TelegramBadRequest as exc:
-        logger.warning("Failed to send targets table, falling back: %s", exc)
-        fallback_lines = [
-            "Таблица целей (упрощённая)",
-            *[
-                f"#{enemy.get('mapPosition')} {enemy.get('name') or '?'}"
-                for enemy in enemies
-            ],
-        ]
-        await message.answer(
-            "\n".join(fallback_lines),
-            reply_markup=_menu_reply(config, message.from_user.id),
-        )
+    table_chunks = await _build_table_messages(enemies, claims, sessionmaker)
+    reply_markup = _menu_reply(config, message.from_user.id)
+    for index, chunk in enumerate(table_chunks):
+        formatted = f"```\n{chunk}\n```"
+        try:
+            await message.answer(
+                formatted,
+                reply_markup=reply_markup if index == 0 else None,
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except TelegramBadRequest as exc:
+            logger.warning("Failed to send targets table, falling back: %s", exc)
+            await message.answer(
+                chunk,
+                reply_markup=reply_markup if index == 0 else None,
+            )
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("targets:claim:"))
@@ -266,6 +366,19 @@ async def target_claim(
         await callback.message.answer("Выбор целей доступен только в подготовке.")
         return
     war_row = await _ensure_war_row(sessionmaker, war)
+    async with sessionmaker() as session:
+        user = (
+            await session.execute(
+                select(models.User).where(models.User.telegram_id == user_id)
+            )
+        ).scalar_one_or_none()
+    if not user:
+        await callback.message.answer("Сначала зарегистрируйтесь через /register.")
+        await _safe_delete_message(
+            callback.message,
+            "Не удалось удалить сообщение. Проверьте права бота в чате.",
+        )
+        return
 
     try:
         async with sessionmaker() as session:
@@ -295,13 +408,36 @@ async def target_claim(
                     )
             except IntegrityError:
                 await session.rollback()
+                existing = (
+                    await session.execute(
+                        select(models.TargetClaim).where(
+                            models.TargetClaim.war_id == war_row.id,
+                            models.TargetClaim.enemy_position == position,
+                        )
+                    )
+                ).scalar_one_or_none()
+                holder = "другим игроком"
+                if existing:
+                    if existing.external_player_name:
+                        holder = existing.external_player_name
+                    elif existing.claimed_by_telegram_id:
+                        holder_user = (
+                            await session.execute(
+                                select(models.User).where(
+                                    models.User.telegram_id == existing.claimed_by_telegram_id
+                                )
+                            )
+                        ).scalar_one_or_none()
+                        if holder_user:
+                            holder_name = f"@{holder_user.username}" if holder_user.username else holder_user.player_name
+                            holder = holder_name
                 logger.info(
                     "Target claim conflict (user_id=%s war_id=%s target_position=%s db_result=conflict)",
                     user_id,
                     war_row.id,
                     position,
                 )
-                await callback.message.answer("Цель уже занята. Выберите другую.")
+                await callback.message.answer(f"Цель уже занята: {holder}.")
                 await _safe_delete_message(
                     callback.message,
                     "Не удалось удалить сообщение. Проверьте права бота в чате.",
@@ -474,7 +610,7 @@ async def targets_assign_other(
             reply_markup=_menu_reply(config, message.from_user.id),
         )
         return
-    enemies = war.get("opponent", {}).get("members", [])
+    enemies = _sorted_enemies(war.get("opponent", {}).get("members", []))
     if not enemies:
         await message.answer("Нет списка противников.", reply_markup=_menu_reply(config, message.from_user.id))
         return

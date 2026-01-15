@@ -14,7 +14,8 @@ def targets_select_kb(
     if admin_rows:
         for text, callback in admin_rows:
             rows.append([InlineKeyboardButton(text=text, callback_data=callback)])
-    for enemy in enemies:
+    sorted_enemies = sorted(enemies, key=lambda enemy: enemy.get("mapPosition") or 0)
+    for enemy in sorted_enemies:
         pos = enemy.get("mapPosition")
         name = enemy.get("name") or "?"
         th = enemy.get("townhallLevel")
