@@ -180,7 +180,7 @@ async def main_menu_button(message: Message, state: FSMContext, config: BotConfi
     )
 
 
-@router.callback_query()
+@router.callback_query(F.data.startswith("menu:"))
 async def menu_callbacks(
     callback: CallbackQuery,
     state: FSMContext,
