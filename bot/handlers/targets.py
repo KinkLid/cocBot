@@ -3,12 +3,13 @@ from __future__ import annotations
 import logging
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bot.config import BotConfig
@@ -37,6 +38,22 @@ async def _load_war(coc_client: CocClient, clan_tag: str) -> dict | None:
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to fetch war: %s", exc)
         return None
+
+
+async def _safe_delete_message(message: Message, notify_text: str | None = None) -> bool:
+    try:
+        await message.delete()
+        return True
+    except (TelegramBadRequest, TelegramForbiddenError) as exc:
+        logger.warning("Failed to delete message: %s", exc)
+        if notify_text:
+            await message.answer(notify_text)
+        return False
+    except TelegramAPIError as exc:
+        logger.exception("Telegram API error on delete: %s", exc)
+        if notify_text:
+            await message.answer(notify_text)
+        return False
 
 
 async def _ensure_war_row(sessionmaker: async_sessionmaker, war: dict) -> models.War:
@@ -236,34 +253,48 @@ async def target_claim(
         return
     war_row = await _ensure_war_row(sessionmaker, war)
 
-    async with sessionmaker() as session:
-        my_claims = (
-            await session.execute(
-                select(models.TargetClaim).where(
-                    models.TargetClaim.war_id == war_row.id,
-                    models.TargetClaim.claimed_by_telegram_id == callback.from_user.id,
-                )
-            )
-        ).scalars().all()
-        if len(my_claims) >= 2:
-            await callback.message.answer("Можно выбрать не более двух целей.")
-            await callback.message.delete()
-            return
-        try:
-            async with session.begin():
-                session.add(
-                    models.TargetClaim(
-                        war_id=war_row.id,
-                        enemy_position=position,
-                        claimed_by_telegram_id=callback.from_user.id,
+    try:
+        async with sessionmaker() as session:
+            my_claims = (
+                await session.execute(
+                    select(models.TargetClaim).where(
+                        models.TargetClaim.war_id == war_row.id,
+                        models.TargetClaim.claimed_by_telegram_id == callback.from_user.id,
                     )
                 )
-        except IntegrityError:
-            await callback.message.answer("Цель уже занята. Выберите другую.")
-            await callback.message.delete()
-            return
+            ).scalars().all()
+            if len(my_claims) >= 2:
+                await callback.message.answer("Можно выбрать не более двух целей.")
+                await _safe_delete_message(
+                    callback.message,
+                    "Не удалось удалить сообщение. Проверьте права бота в чате.",
+                )
+                return
+            try:
+                async with session.begin():
+                    session.add(
+                        models.TargetClaim(
+                            war_id=war_row.id,
+                            enemy_position=position,
+                            claimed_by_telegram_id=callback.from_user.id,
+                        )
+                    )
+            except IntegrityError:
+                await callback.message.answer("Цель уже занята. Выберите другую.")
+                await _safe_delete_message(
+                    callback.message,
+                    "Не удалось удалить сообщение. Проверьте права бота в чате.",
+                )
+                return
+    except SQLAlchemyError as exc:
+        logger.exception("Failed to claim target: %s", exc)
+        await callback.message.answer("Не удалось обновить цель. Попробуйте позже.")
+        return
 
-    await callback.message.delete()
+    await _safe_delete_message(
+        callback.message,
+        "Не удалось удалить сообщение. Проверьте права бота в чате.",
+    )
     await callback.message.answer(f"Вы заняли цель #{position}.")
 
 
@@ -276,22 +307,33 @@ async def target_toggle(
     await callback.answer("Обновляю…")
     await reset_state_if_any(state)
     position = int(callback.data.split(":")[2])
-    async with sessionmaker() as session:
-        claim = (
-            await session.execute(
-                select(models.TargetClaim).where(
-                    models.TargetClaim.enemy_position == position,
-                    models.TargetClaim.claimed_by_telegram_id == callback.from_user.id,
+    try:
+        async with sessionmaker() as session:
+            claim = (
+                await session.execute(
+                    select(models.TargetClaim).where(
+                        models.TargetClaim.enemy_position == position,
+                        models.TargetClaim.claimed_by_telegram_id == callback.from_user.id,
+                    )
                 )
-            )
-        ).scalar_one_or_none()
-        if not claim:
-            await callback.message.answer("Эта цель недоступна.")
-            await callback.message.delete()
-            return
-        await session.delete(claim)
-        await session.commit()
-    await callback.message.delete()
+            ).scalar_one_or_none()
+            if not claim:
+                await callback.message.answer("Эта цель недоступна.")
+                await _safe_delete_message(
+                    callback.message,
+                    "Не удалось удалить сообщение. Проверьте права бота в чате.",
+                )
+                return
+            await session.delete(claim)
+            await session.commit()
+    except SQLAlchemyError as exc:
+        logger.exception("Failed to unclaim target: %s", exc)
+        await callback.message.answer("Не удалось обновить цель. Попробуйте позже.")
+        return
+    await _safe_delete_message(
+        callback.message,
+        "Не удалось удалить сообщение. Проверьте права бота в чате.",
+    )
     await callback.message.answer(f"Цель #{position} освобождена.")
 
 
@@ -308,19 +350,30 @@ async def target_admin_unclaim(
         await callback.message.answer("Доступно только администраторам.")
         return
     position = int(callback.data.split(":")[2])
-    async with sessionmaker() as session:
-        claim = (
-            await session.execute(
-                select(models.TargetClaim).where(models.TargetClaim.enemy_position == position)
-            )
-        ).scalar_one_or_none()
-        if not claim:
-            await callback.message.answer("Цель уже свободна.")
-            await callback.message.delete()
-            return
-        await session.delete(claim)
-        await session.commit()
-    await callback.message.delete()
+    try:
+        async with sessionmaker() as session:
+            claim = (
+                await session.execute(
+                    select(models.TargetClaim).where(models.TargetClaim.enemy_position == position)
+                )
+            ).scalar_one_or_none()
+            if not claim:
+                await callback.message.answer("Цель уже свободна.")
+                await _safe_delete_message(
+                    callback.message,
+                    "Не удалось удалить сообщение. Проверьте права бота в чате.",
+                )
+                return
+            await session.delete(claim)
+            await session.commit()
+    except SQLAlchemyError as exc:
+        logger.exception("Failed to admin-unclaim target: %s", exc)
+        await callback.message.answer("Не удалось обновить цель. Попробуйте позже.")
+        return
+    await _safe_delete_message(
+        callback.message,
+        "Не удалось удалить сообщение. Проверьте права бота в чате.",
+    )
     await callback.message.answer(f"Назначение для цели #{position} снято.")
 
 
@@ -368,8 +421,16 @@ async def targets_assign_select(
     position = int(callback.data.split(":")[2])
     await state.update_data(assign_position=position)
     await state.set_state(TargetsState.waiting_external_name)
-    await callback.message.delete()
+    await _safe_delete_message(
+        callback.message,
+        "Не удалось удалить сообщение. Проверьте права бота в чате.",
+    )
     await callback.message.answer("Введите ник игрока в игре:")
+
+
+@router.callback_query(lambda c: c.data == "targets:none")
+async def targets_no_available(callback: CallbackQuery) -> None:
+    await callback.answer("Нет доступных целей.", show_alert=True)
 
 
 @router.message(TargetsState.waiting_external_name)
@@ -396,21 +457,27 @@ async def targets_assign_name(
         await message.answer("Не удалось получить войну.", reply_markup=_menu_reply(config, message.from_user.id))
         return
     war_row = await _ensure_war_row(sessionmaker, war)
-    async with sessionmaker() as session:
-        try:
-            async with session.begin():
-                session.add(
-                    models.TargetClaim(
-                        war_id=war_row.id,
-                        enemy_position=position,
-                        claimed_by_telegram_id=None,
-                        external_player_name=name,
+    try:
+        async with sessionmaker() as session:
+            try:
+                async with session.begin():
+                    session.add(
+                        models.TargetClaim(
+                            war_id=war_row.id,
+                            enemy_position=position,
+                            claimed_by_telegram_id=None,
+                            external_player_name=name,
+                        )
                     )
-                )
-        except IntegrityError:
-            await message.answer("Цель уже занята. Выберите другую.")
-            await state.clear()
-            return
+            except IntegrityError:
+                await message.answer("Цель уже занята. Выберите другую.")
+                await state.clear()
+                return
+    except SQLAlchemyError as exc:
+        logger.exception("Failed to assign external target: %s", exc)
+        await message.answer("Не удалось назначить цель. Попробуйте позже.")
+        await state.clear()
+        return
     await state.clear()
     await message.answer(
         f"Назначено: цель #{position} за {name}.",
