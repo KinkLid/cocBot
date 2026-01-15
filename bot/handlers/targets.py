@@ -92,7 +92,7 @@ async def _build_table(
         users = (await session.execute(select(models.User))).scalars().all()
     user_map = {user.telegram_id: user for user in users}
 
-    lines = ["*Таблица целей*"]
+    lines = ["Таблица целей"]
     for enemy in enemies:
         pos = enemy.get("mapPosition")
         name = enemy.get("name") or "?"
@@ -115,7 +115,7 @@ async def _build_table(
             holder = "участник"
         lines.append(f"{base} — занято: {holder}")
     lines.append("")
-    lines.append("_Флажки в игре API не предоставляет._")
+    lines.append("Флажки в игре API не предоставляет.")
     return "\n".join(lines)
 
 
@@ -226,11 +226,24 @@ async def targets_table_button(
     war_row = await _ensure_war_row(sessionmaker, war)
     claims = await _load_claims(sessionmaker, war_row.id)
     table_text = await _build_table(enemies, claims, sessionmaker)
-    await message.answer(
-        table_text,
-        parse_mode="Markdown",
-        reply_markup=_menu_reply(config, message.from_user.id),
-    )
+    try:
+        await message.answer(
+            table_text,
+            reply_markup=_menu_reply(config, message.from_user.id),
+        )
+    except TelegramBadRequest as exc:
+        logger.warning("Failed to send targets table, falling back: %s", exc)
+        fallback_lines = [
+            "Таблица целей (упрощённая)",
+            *[
+                f"#{enemy.get('mapPosition')} {enemy.get('name') or '?'}"
+                for enemy in enemies
+            ],
+        ]
+        await message.answer(
+            "\n".join(fallback_lines),
+            reply_markup=_menu_reply(config, message.from_user.id),
+        )
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("targets:claim:"))
@@ -244,6 +257,7 @@ async def target_claim(
     await callback.answer("Проверяю…")
     await reset_state_if_any(state)
     position = int(callback.data.split(":")[2])
+    user_id = callback.from_user.id
     war = await _load_war(coc_client, config.clan_tag)
     if not war:
         await callback.message.answer("Не удалось получить войну.")
@@ -259,7 +273,7 @@ async def target_claim(
                 await session.execute(
                     select(models.TargetClaim).where(
                         models.TargetClaim.war_id == war_row.id,
-                        models.TargetClaim.claimed_by_telegram_id == callback.from_user.id,
+                        models.TargetClaim.claimed_by_telegram_id == user_id,
                     )
                 )
             ).scalars().all()
@@ -276,18 +290,37 @@ async def target_claim(
                         models.TargetClaim(
                             war_id=war_row.id,
                             enemy_position=position,
-                            claimed_by_telegram_id=callback.from_user.id,
+                            claimed_by_telegram_id=user_id,
                         )
                     )
             except IntegrityError:
+                await session.rollback()
+                logger.info(
+                    "Target claim conflict (user_id=%s war_id=%s target_position=%s db_result=conflict)",
+                    user_id,
+                    war_row.id,
+                    position,
+                )
                 await callback.message.answer("Цель уже занята. Выберите другую.")
                 await _safe_delete_message(
                     callback.message,
                     "Не удалось удалить сообщение. Проверьте права бота в чате.",
                 )
                 return
+            logger.info(
+                "Target claimed (user_id=%s war_id=%s target_position=%s db_result=created)",
+                user_id,
+                war_row.id,
+                position,
+            )
     except SQLAlchemyError as exc:
-        logger.exception("Failed to claim target: %s", exc)
+        logger.exception(
+            "Failed to claim target (user_id=%s war_id=%s target_position=%s): %s",
+            user_id,
+            war_row.id,
+            position,
+            exc,
+        )
         await callback.message.answer("Не удалось обновить цель. Попробуйте позже.")
         return
 
@@ -302,18 +335,27 @@ async def target_claim(
 async def target_toggle(
     callback: CallbackQuery,
     state: FSMContext,
+    config: BotConfig,
+    coc_client: CocClient,
     sessionmaker: async_sessionmaker,
 ) -> None:
     await callback.answer("Обновляю…")
     await reset_state_if_any(state)
     position = int(callback.data.split(":")[2])
+    user_id = callback.from_user.id
+    war = await _load_war(coc_client, config.clan_tag)
+    if not war:
+        await callback.message.answer("Не удалось получить войну.")
+        return
+    war_row = await _ensure_war_row(sessionmaker, war)
     try:
         async with sessionmaker() as session:
             claim = (
                 await session.execute(
                     select(models.TargetClaim).where(
+                        models.TargetClaim.war_id == war_row.id,
                         models.TargetClaim.enemy_position == position,
-                        models.TargetClaim.claimed_by_telegram_id == callback.from_user.id,
+                        models.TargetClaim.claimed_by_telegram_id == user_id,
                     )
                 )
             ).scalar_one_or_none()
@@ -326,8 +368,20 @@ async def target_toggle(
                 return
             await session.delete(claim)
             await session.commit()
+            logger.info(
+                "Target unclaimed (user_id=%s war_id=%s target_position=%s db_result=deleted)",
+                user_id,
+                war_row.id,
+                position,
+            )
     except SQLAlchemyError as exc:
-        logger.exception("Failed to unclaim target: %s", exc)
+        logger.exception(
+            "Failed to unclaim target (user_id=%s war_id=%s target_position=%s): %s",
+            user_id,
+            war_row.id,
+            position,
+            exc,
+        )
         await callback.message.answer("Не удалось обновить цель. Попробуйте позже.")
         return
     await _safe_delete_message(
@@ -342,6 +396,7 @@ async def target_admin_unclaim(
     callback: CallbackQuery,
     state: FSMContext,
     config: BotConfig,
+    coc_client: CocClient,
     sessionmaker: async_sessionmaker,
 ) -> None:
     await callback.answer("Снимаю…")
@@ -350,11 +405,19 @@ async def target_admin_unclaim(
         await callback.message.answer("Доступно только администраторам.")
         return
     position = int(callback.data.split(":")[2])
+    war = await _load_war(coc_client, config.clan_tag)
+    if not war:
+        await callback.message.answer("Не удалось получить войну.")
+        return
+    war_row = await _ensure_war_row(sessionmaker, war)
     try:
         async with sessionmaker() as session:
             claim = (
                 await session.execute(
-                    select(models.TargetClaim).where(models.TargetClaim.enemy_position == position)
+                    select(models.TargetClaim).where(
+                        models.TargetClaim.war_id == war_row.id,
+                        models.TargetClaim.enemy_position == position,
+                    )
                 )
             ).scalar_one_or_none()
             if not claim:
@@ -366,8 +429,20 @@ async def target_admin_unclaim(
                 return
             await session.delete(claim)
             await session.commit()
+            logger.info(
+                "Target admin-unclaimed (user_id=%s war_id=%s target_position=%s db_result=deleted)",
+                callback.from_user.id,
+                war_row.id,
+                position,
+            )
     except SQLAlchemyError as exc:
-        logger.exception("Failed to admin-unclaim target: %s", exc)
+        logger.exception(
+            "Failed to admin-unclaim target (user_id=%s war_id=%s target_position=%s): %s",
+            callback.from_user.id,
+            war_row.id,
+            position,
+            exc,
+        )
         await callback.message.answer("Не удалось обновить цель. Попробуйте позже.")
         return
     await _safe_delete_message(
@@ -470,11 +545,30 @@ async def targets_assign_name(
                         )
                     )
             except IntegrityError:
+                await session.rollback()
+                logger.info(
+                    "Target assign conflict (user_id=%s war_id=%s target_position=%s db_result=conflict)",
+                    message.from_user.id,
+                    war_row.id,
+                    position,
+                )
                 await message.answer("Цель уже занята. Выберите другую.")
                 await state.clear()
                 return
+            logger.info(
+                "Target assigned (user_id=%s war_id=%s target_position=%s db_result=created)",
+                message.from_user.id,
+                war_row.id,
+                position,
+            )
     except SQLAlchemyError as exc:
-        logger.exception("Failed to assign external target: %s", exc)
+        logger.exception(
+            "Failed to assign external target (user_id=%s war_id=%s target_position=%s): %s",
+            message.from_user.id,
+            war_row.id,
+            position,
+            exc,
+        )
         await message.answer("Не удалось назначить цель. Попробуйте позже.")
         await state.clear()
         return
