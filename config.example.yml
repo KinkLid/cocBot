@@ -1,0 +1,11 @@
+bot_token: "telegram-bot-token"
+coc_api_token: "clash-api-token"
+clan_tag: "#ABC123"
+main_chat_id: -1001234567890
+admin_telegram_ids:
+  - 123456789
+  - 987654321
+timezone: "Europe/Moscow"
+database_url: "postgresql+asyncpg://cocbot:cocbot@db:5432/cocbot"
+log_level: "INFO"
+default_notify_channel: "dm"
