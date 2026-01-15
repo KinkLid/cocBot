@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from aiogram import F, Router
 from aiogram.enums import ChatType
 from aiogram.filters import Command, CommandStart
@@ -14,13 +16,14 @@ from bot.handlers.notify import notify_command
 from bot.handlers.registration import start_registration
 from bot.handlers.stats import mystats_command
 from bot.handlers.targets import targets_command
-from bot.keyboards.common import main_menu, main_menu_reply
+from bot.keyboards.common import admin_menu_reply, main_menu_reply, profile_menu_reply
 from bot.services.coc_client import CocClient
 from bot.services.permissions import is_admin
 from bot.texts.help import build_help_text
 from bot.utils.state import reset_state_if_any
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 @router.message(CommandStart())
@@ -37,14 +40,19 @@ async def start_command(
         await start_registration(message, state, bot_username, config, sessionmaker)
         return
     await message.answer(
-        "Привет! Это бот клана Clash of Clans. Используйте /register для регистрации.",
+        "Привет! Это бот клана Clash of Clans. Нажмите «Регистрация», чтобы начать.",
         reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
     )
-    await message.answer(
-        "Быстрые действия доступны кнопками ниже.",
-        reply_markup=main_menu(is_admin(message.from_user.id, config)),
-    )
 
+
+async def _get_user_profile(
+    sessionmaker: async_sessionmaker,
+    telegram_id: int,
+) -> models.User | None:
+    async with sessionmaker() as session:
+        return (
+            await session.execute(select(models.User).where(models.User.telegram_id == telegram_id))
+        ).scalar_one_or_none()
 
 @router.message(Command("me"))
 async def me_command(
@@ -54,19 +62,17 @@ async def me_command(
     sessionmaker: async_sessionmaker,
 ) -> None:
     await reset_state_if_any(state)
-    async with sessionmaker() as session:
-        user = (
-            await session.execute(select(models.User).where(models.User.telegram_id == message.from_user.id))
-        ).scalar_one_or_none()
+    user = await _get_user_profile(sessionmaker, message.from_user.id)
+    logger.debug("profile lookup telegram_id=%s found=%s", message.from_user.id, bool(user))
     if not user:
         await message.answer(
-            "Вы не зарегистрированы. Используйте /register.",
+            "Вы ещё не зарегистрированы. Нажмите «Регистрация».",
             reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
         )
         return
     await message.answer(
-        f"Вы связаны с {user.player_name} ({user.player_tag})",
-        reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        f"Профиль: {user.player_name} ({user.player_tag})\nКлан: {user.clan_tag}",
+        reply_markup=profile_menu_reply(),
     )
 
 
@@ -85,7 +91,10 @@ async def whois_command(
         if len(parts) > 1 and parts[1].startswith("@"):
             username = parts[1].lstrip("@")
     if not target_user and not username:
-        await message.answer("Ответьте на сообщение пользователя или укажите @username.")
+        await message.answer(
+            "Ответьте на сообщение пользователя или укажите @username.",
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        )
         return
 
     async with sessionmaker() as session:
@@ -113,15 +122,33 @@ async def whois_command(
 
 
 @router.message(Command("help"))
-async def help_command(message: Message, state: FSMContext, bot_username: str) -> None:
+async def help_command(
+    message: Message,
+    state: FSMContext,
+    bot_username: str,
+    config: BotConfig,
+) -> None:
     await reset_state_if_any(state)
-    await message.answer(build_help_text(bot_username), parse_mode="Markdown")
+    await message.answer(
+        build_help_text(bot_username),
+        parse_mode="Markdown",
+        reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+    )
 
 
 @router.message(F.text == "Помощь / Гайд")
-async def help_button(message: Message, state: FSMContext, bot_username: str) -> None:
+async def help_button(
+    message: Message,
+    state: FSMContext,
+    bot_username: str,
+    config: BotConfig,
+) -> None:
     await reset_state_if_any(state)
-    await message.answer(build_help_text(bot_username), parse_mode="Markdown")
+    await message.answer(
+        build_help_text(bot_username),
+        parse_mode="Markdown",
+        reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+    )
 
 
 @router.message(F.text == "Мой профиль")
@@ -152,6 +179,15 @@ async def cancel_button(message: Message, state: FSMContext, config: BotConfig) 
     )
 
 
+@router.message(F.text == "Главное меню")
+async def main_menu_button(message: Message, state: FSMContext, config: BotConfig) -> None:
+    await reset_state_if_any(state)
+    await message.answer(
+        "Главное меню.",
+        reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+    )
+
+
 @router.callback_query()
 async def menu_callbacks(
     callback: CallbackQuery,
@@ -166,17 +202,41 @@ async def menu_callbacks(
     if callback.data == "menu:register":
         await start_registration(callback.message, state, bot_username, config, sessionmaker)
     elif callback.data == "menu:me":
-        await me_command(callback.message, state, config, sessionmaker)
+        user = await _get_user_profile(sessionmaker, callback.from_user.id)
+        logger.debug("profile lookup telegram_id=%s found=%s", callback.from_user.id, bool(user))
+        if not user:
+            await callback.message.answer(
+                "Вы ещё не зарегистрированы. Нажмите «Регистрация».",
+                reply_markup=main_menu_reply(is_admin(callback.from_user.id, config)),
+            )
+            return
+        await callback.message.answer(
+            f"Профиль: {user.player_name} ({user.player_tag})\nКлан: {user.clan_tag}",
+            reply_markup=profile_menu_reply(),
+        )
     elif callback.data == "menu:mystats":
-        await mystats_command(callback.message, state, config, sessionmaker)
+        await mystats_command(callback.message, state, config, sessionmaker, coc_client)
     elif callback.data == "menu:notify":
         await notify_command(callback.message, state, config, sessionmaker)
     elif callback.data == "menu:targets":
         await targets_command(callback.message, state, config, coc_client, sessionmaker)
     elif callback.data == "menu:guide":
-        await callback.message.answer(build_help_text(bot_username), parse_mode="Markdown")
+        await callback.message.answer(
+            build_help_text(bot_username),
+            parse_mode="Markdown",
+            reply_markup=main_menu_reply(is_admin(callback.from_user.id, config)),
+        )
     elif callback.data == "menu:admin":
-        await callback.message.answer("Используйте команду /wipe.")
+        if not is_admin(callback.from_user.id, config):
+            await callback.message.answer(
+                "Админ-панель доступна только администраторам.",
+                reply_markup=main_menu_reply(is_admin(callback.from_user.id, config)),
+            )
+            return
+        await callback.message.answer(
+            "Админ-панель.",
+            reply_markup=admin_menu_reply(),
+        )
     elif callback.data == "menu:cancel":
         await callback.message.answer(
             "Действие отменено.",

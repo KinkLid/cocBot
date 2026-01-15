@@ -1,14 +1,9 @@
 from __future__ import annotations
 
-from aiogram.types import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
-)
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
 
-def main_menu(is_admin: bool) -> InlineKeyboardMarkup:
+def main_menu_inline(is_admin: bool) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="Регистрация", callback_data="menu:register")],
         [InlineKeyboardButton(text="Мой профиль", callback_data="menu:me")],
@@ -37,13 +32,65 @@ def main_menu_reply(is_admin: bool) -> ReplyKeyboardMarkup:
     )
 
 
-def registration_reply(is_admin: bool) -> ReplyKeyboardMarkup:
+def registration_reply() -> ReplyKeyboardMarkup:
     keyboard = [[KeyboardButton(text="Отмена")]]
-    keyboard.extend(main_menu_reply(is_admin).keyboard)
     return ReplyKeyboardMarkup(
         keyboard=keyboard,
         resize_keyboard=True,
-        is_persistent=True,
+    )
+
+
+def profile_menu_reply() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="Главное меню")]],
+        resize_keyboard=True,
+    )
+
+
+def stats_menu_reply() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Обновить статистику")],
+            [KeyboardButton(text="Главное меню")],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def notify_menu_reply() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="В ЛС"), KeyboardButton(text="В общий чат")],
+            [KeyboardButton(text="Главное меню")],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def targets_menu_reply() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Выбрать цель"), KeyboardButton(text="Таблица целей")],
+            [KeyboardButton(text="Главное меню")],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def admin_menu_reply() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Очистить игрока"), KeyboardButton(text="Диагностика")],
+            [KeyboardButton(text="Назад")],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def admin_action_reply() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="Отмена"), KeyboardButton(text="Назад")]],
+        resize_keyboard=True,
     )
 
 

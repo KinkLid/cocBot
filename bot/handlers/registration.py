@@ -74,7 +74,7 @@ async def start_registration(
     await state.set_state(RegisterState.waiting_tag)
     await message.answer(
         "Введите ваш player tag (например #ABC123):",
-        reply_markup=registration_reply(is_admin(message.from_user.id, config)),
+        reply_markup=registration_reply(),
     )
 
 
@@ -101,19 +101,19 @@ async def register_button(
 
 
 @router.message(RegisterState.waiting_tag)
-async def register_tag(message: Message, state: FSMContext, config: BotConfig) -> None:
+async def register_tag(message: Message, state: FSMContext) -> None:
     tag = normalize_tag(message.text or "")
     if not is_valid_tag(tag):
         await message.answer(
             "Некорректный тег. Пример: #ABC123",
-            reply_markup=registration_reply(is_admin(message.from_user.id, config)),
+            reply_markup=registration_reply(),
         )
         return
     await state.update_data(player_tag=tag)
     await state.set_state(RegisterState.waiting_token)
     await message.answer(
         "Теперь пришлите in-game API token (из профиля в игре):",
-        reply_markup=registration_reply(is_admin(message.from_user.id, config)),
+        reply_markup=registration_reply(),
     )
 
 
@@ -131,8 +131,8 @@ async def register_token(
     if not player_tag:
         await state.clear()
         await message.answer(
-            "Что-то пошло не так. Начните /register заново.",
-            reply_markup=registration_reply(is_admin(message.from_user.id, config)),
+            "Что-то пошло не так. Нажмите «Регистрация» ещё раз.",
+            reply_markup=registration_reply(),
         )
         return
 
@@ -142,14 +142,14 @@ async def register_token(
         logger.warning("Verify token failed: %s", exc)
         await message.answer(
             "Не удалось проверить токен. Попробуйте позже.",
-            reply_markup=registration_reply(is_admin(message.from_user.id, config)),
+            reply_markup=registration_reply(),
         )
         return
 
     if not verified:
         await message.answer(
             "Токен не подходит. Проверьте правильность.",
-            reply_markup=registration_reply(is_admin(message.from_user.id, config)),
+            reply_markup=registration_reply(),
         )
         return
 
@@ -159,7 +159,7 @@ async def register_token(
         logger.warning("Fetch player failed: %s", exc)
         await message.answer(
             "Не удалось получить профиль игрока.",
-            reply_markup=registration_reply(is_admin(message.from_user.id, config)),
+            reply_markup=registration_reply(),
         )
         return
 
@@ -167,7 +167,7 @@ async def register_token(
     if not clan_tag or clan_tag.upper() != config.clan_tag.upper():
         await message.answer(
             "Игрок не состоит в этом клане.",
-            reply_markup=registration_reply(is_admin(message.from_user.id, config)),
+            reply_markup=registration_reply(),
         )
         return
 
