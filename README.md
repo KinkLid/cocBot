@@ -43,6 +43,19 @@
    docker-compose run --rm bot alembic upgrade head
    ```
 
+## Диагностика: две головы Alembic в Docker
+Если `alembic heads` показывает две версии, но локально старого файла нет, скорее
+всего старый файл остался внутри Docker-образа. Сделайте пересборку без кеша и
+проверьте головы снова:
+```bash
+docker compose build --no-cache bot
+docker compose run --rm bot alembic heads
+```
+Должна остаться только одна голова. После этого можно применить миграции:
+```bash
+docker compose run --rm bot alembic upgrade head
+```
+
 ## Получение токенов
 ### Telegram Bot Token
 1. Напишите @BotFather
