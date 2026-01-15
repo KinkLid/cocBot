@@ -11,7 +11,6 @@ from bot.config import BotConfig
 from bot.db import models
 from bot.keyboards.common import main_menu_reply, stats_menu_reply
 from bot.keyboards.seasons import seasons_kb
-from bot.keyboards.stats import stats_actions_kb
 from bot.services.coc_client import CocClient
 from bot.services.permissions import is_admin
 from bot.utils.state import reset_state_if_any
@@ -47,8 +46,6 @@ def _format_stats(player: dict, war_summary: str | None, capital_summary: str | 
     if capital_summary:
         lines.append("")
         lines.append(capital_summary)
-    lines.append("")
-    lines.append("_Часть метрик общие для игрока, CoC API не всегда делит их по кланам._")
     return "\n".join(lines)
 
 
@@ -127,18 +124,10 @@ async def mystats_command(
 
     war_summary = await _load_warlog_summary(coc_client, config.clan_tag, user.player_tag)
     capital_summary = await _load_capital_summary(coc_client, config.clan_tag, user.player_tag)
-    async with sessionmaker() as session:
-        has_seasons = (
-            await session.execute(select(models.Season.id).limit(1))
-        ).scalar_one_or_none() is not None
+    await _send_or_edit_stats(message, sessionmaker, user, _format_stats(player, war_summary, capital_summary))
     await message.answer(
-        _format_stats(player, war_summary, capital_summary),
+        "Экран статистики.",
         reply_markup=stats_menu_reply(),
-        parse_mode="Markdown",
-    )
-    await message.answer(
-        "Доступные действия:",
-        reply_markup=stats_actions_kb(has_seasons),
     )
 
 
@@ -183,7 +172,7 @@ async def season_callback(callback: CallbackQuery, state: FSMContext, config: Bo
     season_id = int(callback.data.split(":", 1)[1])
     await callback.message.answer(
         f"Сезон выбран: {season_id}.",
-        reply_markup=main_menu_reply(is_admin(callback.from_user.id, config)),
+        reply_markup=stats_menu_reply(),
     )
     await callback.answer()
     await reset_state_if_any(state)
@@ -208,80 +197,51 @@ async def stats_refresh_button(
     sessionmaker: async_sessionmaker,
     coc_client: CocClient,
 ) -> None:
-    await mystats_command(message, state, config, sessionmaker, coc_client)
-
-
-@router.callback_query(lambda c: c.data == "stats:refresh")
-async def stats_refresh_callback(
-    callback: CallbackQuery,
-    state: FSMContext,
-    config: BotConfig,
-    sessionmaker: async_sessionmaker,
-    coc_client: CocClient,
-) -> None:
-    await callback.answer("Обновляю…")
     await reset_state_if_any(state)
-    user = await _get_user_for_callback(callback, sessionmaker)
+    async with sessionmaker() as session:
+        user = (
+            await session.execute(select(models.User).where(models.User.telegram_id == message.from_user.id))
+        ).scalar_one_or_none()
     if not user:
-        await callback.message.answer(
+        await message.answer(
             "Вы ещё не зарегистрированы. Нажмите «Регистрация».",
-            reply_markup=main_menu_reply(is_admin(callback.from_user.id, config)),
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
         )
         return
     try:
         player = await coc_client.get_player(user.player_tag)
     except Exception:  # noqa: BLE001
-        await callback.message.answer(
+        await message.answer(
             "Не удалось получить статистику из CoC API. Попробуйте позже.",
             reply_markup=stats_menu_reply(),
         )
         return
     war_summary = await _load_warlog_summary(coc_client, config.clan_tag, user.player_tag)
     capital_summary = await _load_capital_summary(coc_client, config.clan_tag, user.player_tag)
-    async with sessionmaker() as session:
-        has_seasons = (
-            await session.execute(select(models.Season.id).limit(1))
-        ).scalar_one_or_none() is not None
-    await callback.message.answer(
-        _format_stats(player, war_summary, capital_summary),
-        reply_markup=stats_menu_reply(),
-        parse_mode="Markdown",
-    )
-    await callback.message.answer(
-        "Доступные действия:",
-        reply_markup=stats_actions_kb(has_seasons),
-    )
+    await _send_or_edit_stats(message, sessionmaker, user, _format_stats(player, war_summary, capital_summary))
 
 
-async def _get_user_for_callback(
-    callback: CallbackQuery,
+async def _send_or_edit_stats(
+    message: Message,
     sessionmaker: async_sessionmaker,
-) -> models.User | None:
-    async with sessionmaker() as session:
-        return (
-            await session.execute(
-                select(models.User).where(models.User.telegram_id == callback.from_user.id)
-            )
-        ).scalar_one_or_none()
-
-
-@router.callback_query(lambda c: c.data == "stats:seasons")
-async def stats_seasons_callback(
-    callback: CallbackQuery,
-    state: FSMContext,
-    config: BotConfig,
-    sessionmaker: async_sessionmaker,
+    user: models.User,
+    text: str,
 ) -> None:
-    await callback.answer()
-    await reset_state_if_any(state)
     async with sessionmaker() as session:
-        seasons = (
-            await session.execute(select(models.Season.id, models.Season.name).order_by(models.Season.end_at.desc()))
-        ).all()
-    if not seasons:
-        await callback.message.answer(
-            "Сезоны появятся после первой ЛВК.",
-            reply_markup=stats_menu_reply(),
-        )
-        return
-    await callback.message.answer("Выберите сезон:", reply_markup=seasons_kb(seasons))
+        user = (
+            await session.execute(select(models.User).where(models.User.telegram_id == user.telegram_id))
+        ).scalar_one()
+        if user.last_stats_message_id:
+            try:
+                await message.bot.edit_message_text(
+                    chat_id=message.chat.id,
+                    message_id=user.last_stats_message_id,
+                    text=text,
+                    parse_mode="Markdown",
+                )
+                return
+            except Exception:  # noqa: BLE001
+                pass
+        sent = await message.answer(text, parse_mode="Markdown")
+        user.last_stats_message_id = sent.message_id
+        await session.commit()

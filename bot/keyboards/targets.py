@@ -3,23 +3,30 @@ from __future__ import annotations
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
-def targets_select_kb(enemies: list[dict], taken_positions: set[int]) -> InlineKeyboardMarkup:
+def targets_select_kb(
+    enemies: list[dict],
+    taken_positions: set[int],
+    my_positions: set[int],
+    assign_mode: bool = False,
+    admin_rows: list[tuple[str, str]] | None = None,
+) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
+    if admin_rows:
+        for text, callback in admin_rows:
+            rows.append([InlineKeyboardButton(text=text, callback_data=callback)])
     for enemy in enemies:
         pos = enemy.get("mapPosition")
-        if pos in taken_positions:
-            continue
         name = enemy.get("name") or "?"
         th = enemy.get("townhallLevel")
-        text = f"#{pos} {name} TH{th}" if th else f"#{pos} {name}"
-        rows.append([InlineKeyboardButton(text=text, callback_data=f"targets:claim:{pos}")])
+        base = f"#{pos} {name} TH{th}" if th else f"#{pos} {name}"
+        if pos in my_positions and not assign_mode:
+            text = f"✅ {base}"
+            rows.append([InlineKeyboardButton(text=text, callback_data=f"targets:toggle:{pos}")])
+            continue
+        if pos in taken_positions:
+            continue
+        callback = f"targets:assign:{pos}" if assign_mode else f"targets:claim:{pos}"
+        rows.append([InlineKeyboardButton(text=base, callback_data=callback)])
     if not rows:
-        rows.append([InlineKeyboardButton(text="Нет свободных целей", callback_data="targets:none")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def targets_table_kb(has_claim: bool) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text="Обновить таблицу", callback_data="targets:refresh")]]
-    if has_claim:
-        rows.append([InlineKeyboardButton(text="Снять мою цель", callback_data="targets:unclaim")])
+        rows.append([InlineKeyboardButton(text="Нет доступных целей", callback_data="targets:none")])
     return InlineKeyboardMarkup(inline_keyboard=rows)

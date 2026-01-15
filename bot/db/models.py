@@ -30,6 +30,7 @@ class User(Base):
     clan_tag: Mapped[str] = mapped_column(String(16))
     role_flags: Mapped[int] = mapped_column(Integer, default=0)
     notify_pref: Mapped[dict] = mapped_column(JSONB, default=dict)
+    last_stats_message_id: Mapped[Optional[int]] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
@@ -136,7 +137,10 @@ class TargetClaim(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     war_id: Mapped[int] = mapped_column(Integer, ForeignKey("wars.id"))
     enemy_position: Mapped[int] = mapped_column(Integer)
-    claimed_by_telegram_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.telegram_id"))
+    claimed_by_telegram_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_id")
+    )
+    external_player_name: Mapped[Optional[str]] = mapped_column(String(64))
     claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
     user: Mapped[User] = relationship("User", back_populates="target_claims")

@@ -161,22 +161,14 @@ async def profile_button(
     await me_command(message, state, config, sessionmaker)
 
 
-@router.message(Command("cancel"))
-async def cancel_command(message: Message, state: FSMContext, config: BotConfig) -> None:
-    await reset_state_if_any(state)
-    await message.answer(
-        "Действие отменено.",
-        reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
-    )
-
-
-@router.message(F.text == "Отмена")
-async def cancel_button(message: Message, state: FSMContext, config: BotConfig) -> None:
-    await reset_state_if_any(state)
-    await message.answer(
-        "Действие отменено.",
-        reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
-    )
+@router.message(F.text == "Показать профиль")
+async def show_profile_button(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+) -> None:
+    await me_command(message, state, config, sessionmaker)
 
 
 @router.message(F.text == "Главное меню")
@@ -236,9 +228,4 @@ async def menu_callbacks(
         await callback.message.answer(
             "Админ-панель.",
             reply_markup=admin_menu_reply(),
-        )
-    elif callback.data == "menu:cancel":
-        await callback.message.answer(
-            "Действие отменено.",
-            reply_markup=main_menu_reply(is_admin(callback.from_user.id, config)),
         )

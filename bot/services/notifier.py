@@ -12,15 +12,15 @@ logger = logging.getLogger(__name__)
 
 
 async def notify_user(bot: Bot, config: BotConfig, user_id: int, text: str, pref: dict[str, Any]) -> None:
-    channel = pref.get("channel", config.default_notify_channel)
-    if channel == "chat":
-        await bot.send_message(chat_id=config.main_chat_id, text=text)
-        return
+    dm_enabled = bool(pref.get("dm_enabled", False))
+    await bot.send_message(chat_id=config.main_chat_id, text=text)
     try:
-        await bot.send_message(chat_id=user_id, text=text)
+        if dm_enabled:
+            await bot.send_message(chat_id=user_id, text=text)
     except TelegramForbiddenError:
         logger.info("DM forbidden for %s", user_id)
-        await bot.send_message(
-            chat_id=config.main_chat_id,
-            text="Не могу отправить ЛС. Откройте ЛС или переключитесь на уведомления в чате.",
-        )
+        if dm_enabled:
+            await bot.send_message(
+                chat_id=config.main_chat_id,
+                text="Не могу отправить ЛС одному из участников. Проверьте настройки ЛС.",
+            )

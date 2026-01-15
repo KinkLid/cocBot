@@ -33,7 +33,10 @@ def main_menu_reply(is_admin: bool) -> ReplyKeyboardMarkup:
 
 
 def registration_reply() -> ReplyKeyboardMarkup:
-    keyboard = [[KeyboardButton(text="Отмена")]]
+    keyboard = [
+        [KeyboardButton(text="Показать профиль")],
+        [KeyboardButton(text="Главное меню")],
+    ]
     return ReplyKeyboardMarkup(
         keyboard=keyboard,
         resize_keyboard=True,
@@ -57,10 +60,13 @@ def stats_menu_reply() -> ReplyKeyboardMarkup:
     )
 
 
-def notify_menu_reply() -> ReplyKeyboardMarkup:
+def notify_menu_reply(dm_enabled: bool) -> ReplyKeyboardMarkup:
+    status = "✅ ЛС включены" if dm_enabled else "Включить ЛС"
+    toggle = "Выключить ЛС" if dm_enabled else "Включить ЛС"
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="В ЛС"), KeyboardButton(text="В общий чат")],
+            [KeyboardButton(text=status)],
+            [KeyboardButton(text=toggle)],
             [KeyboardButton(text="Главное меню")],
         ],
         resize_keyboard=True,
@@ -70,7 +76,19 @@ def notify_menu_reply() -> ReplyKeyboardMarkup:
 def targets_menu_reply() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="Выбрать цель"), KeyboardButton(text="Таблица целей")],
+            [KeyboardButton(text="Выбрать противника"), KeyboardButton(text="Таблица целей")],
+            [KeyboardButton(text="Обновить таблицу")],
+            [KeyboardButton(text="Главное меню")],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def targets_admin_reply() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Выбрать противника"), KeyboardButton(text="Таблица целей")],
+            [KeyboardButton(text="Обновить таблицу"), KeyboardButton(text="Назначить другому")],
             [KeyboardButton(text="Главное меню")],
         ],
         resize_keyboard=True,
@@ -89,15 +107,6 @@ def admin_menu_reply() -> ReplyKeyboardMarkup:
 
 def admin_action_reply() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="Отмена"), KeyboardButton(text="Назад")]],
+        keyboard=[[KeyboardButton(text="Назад")], [KeyboardButton(text="Главное меню")]],
         resize_keyboard=True,
-    )
-
-
-def already_registered_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Показать профиль", callback_data="menu:me")],
-            [InlineKeyboardButton(text="Отмена", callback_data="menu:cancel")],
-        ]
     )

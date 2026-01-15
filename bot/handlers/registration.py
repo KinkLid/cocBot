@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bot.config import BotConfig
 from bot.db import models
-from bot.keyboards.common import already_registered_kb, main_menu_reply, registration_reply
+from bot.keyboards.common import main_menu_reply, registration_reply
 from bot.services.coc_client import CocClient
 from bot.services.permissions import is_admin
 from bot.utils.state import reset_state_if_any
@@ -52,8 +52,8 @@ async def _reject_if_registered(
         reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
     )
     await message.answer(
-        "Повторная регистрация запрещена.",
-        reply_markup=already_registered_kb(),
+        "Повторная регистрация запрещена. Нажмите «Показать профиль» или «Главное меню».",
+        reply_markup=registration_reply(),
     )
     return True
 
@@ -189,7 +189,7 @@ async def register_token(
                     player_tag=player_tag,
                     player_name=player_data.get("name", ""),
                     clan_tag=clan_tag,
-                    notify_pref={"channel": config.default_notify_channel},
+                    notify_pref={"dm_enabled": True},
                 )
             )
         await session.commit()
