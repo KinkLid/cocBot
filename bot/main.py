@@ -11,6 +11,7 @@ from bot.db import build_engine, build_sessionmaker
 from bot.handlers import admin, common, notify, registration, stats, targets
 from bot.jobs.scheduler import configure_scheduler
 from bot.services.coc_client import CocClient
+from bot.services.notifications import NotificationService
 from bot.services.stats_collector import StatsCollector
 
 
@@ -33,7 +34,8 @@ async def main() -> None:
     sessionmaker = build_sessionmaker(engine)
     coc_client = CocClient(base_url="https://api.clashofclans.com/v1", token=config.coc_api_token)
     stats_collector = StatsCollector(sessionmaker, coc_client, config.clan_tag)
-    scheduler = configure_scheduler(stats_collector)
+    notifier = NotificationService(bot, config, sessionmaker, coc_client)
+    scheduler = configure_scheduler(stats_collector, notifier)
 
     dp["config"] = config
     dp["sessionmaker"] = sessionmaker

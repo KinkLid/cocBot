@@ -189,7 +189,16 @@ async def register_token(
                     player_tag=player_tag,
                     player_name=player_data.get("name", ""),
                     clan_tag=clan_tag,
-                    notify_pref={"dm_enabled": True},
+                    notify_pref={
+                        "dm_enabled": True,
+                        "dm_types": {
+                            "preparation": True,
+                            "inWar": True,
+                            "warEnded": True,
+                            "cwlEnded": False,
+                        },
+                        "dm_window": "always",
+                    },
                 )
             )
         await session.commit()
