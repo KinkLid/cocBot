@@ -28,7 +28,6 @@ def main_menu_reply(is_admin: bool) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=keyboard,
         resize_keyboard=True,
-        is_persistent=True,
     )
 
 
@@ -60,26 +59,30 @@ def stats_menu_reply() -> ReplyKeyboardMarkup:
     )
 
 
-def notify_menu_reply(
-    dm_enabled: bool,
-    dm_types: dict[str, bool],
-    dm_window: str,
-) -> ReplyKeyboardMarkup:
-    status = "✅ ЛС включены" if dm_enabled else "⛔ ЛС выключены"
+def notify_menu_reply(dm_enabled: bool, dm_window: str) -> ReplyKeyboardMarkup:
+    status = "ЛС: ✅ включены" if dm_enabled else "ЛС: ⛔ выключены"
     toggle = "Выключить ЛС" if dm_enabled else "Включить ЛС"
-    prep_label = "W1 подготовка: ✅" if dm_types.get("preparation", True) else "W1 подготовка: ⛔"
-    in_war_label = "W2 война: ✅" if dm_types.get("inWar", True) else "W2 война: ⛔"
-    ended_label = "W3 итог: ✅" if dm_types.get("warEnded", True) else "W3 итог: ⛔"
-    cwl_label = "W4 ЛВК: ✅" if dm_types.get("cwlEnded", False) else "W4 ЛВК: ⛔"
     window_label = "Время ЛС: всегда" if dm_window == "always" else "Время ЛС: день"
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=status)],
-            [KeyboardButton(text=toggle)],
-            [KeyboardButton(text=prep_label), KeyboardButton(text=in_war_label)],
-            [KeyboardButton(text=ended_label), KeyboardButton(text=cwl_label)],
+            [KeyboardButton(text=status), KeyboardButton(text=toggle)],
+            [KeyboardButton(text="Клановые войны"), KeyboardButton(text="ЛВК")],
+            [KeyboardButton(text="Рейды столицы")],
             [KeyboardButton(text=window_label)],
             [KeyboardButton(text="Главное меню")],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def notify_category_reply(category_label: str, dm_enabled: bool, category_enabled: bool) -> ReplyKeyboardMarkup:
+    status = "✅ получать в ЛС" if category_enabled and dm_enabled else "⛔ не получать в ЛС"
+    toggle = "Отключить ЛС для раздела" if category_enabled else "Включить ЛС для раздела"
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=f"{category_label}: {status}")],
+            [KeyboardButton(text=toggle)],
+            [KeyboardButton(text="Назад к уведомлениям")],
         ],
         resize_keyboard=True,
     )
@@ -110,36 +113,105 @@ def admin_menu_reply() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="Очистить игрока"), KeyboardButton(text="Диагностика")],
-            [KeyboardButton(text="Настройки уведомлений чата")],
-            [KeyboardButton(text="Создать напоминание о войне")],
+            [KeyboardButton(text="Уведомления")],
+            [KeyboardButton(text="Назад")],
+        ],
+        resize_keyboard=True,
+    )
+
+def admin_notify_menu_reply() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Клановые войны (чат)"), KeyboardButton(text="ЛВК (чат)")],
+            [KeyboardButton(text="Рейды столицы (чат)")],
             [KeyboardButton(text="Назад")],
         ],
         resize_keyboard=True,
     )
 
 
-def admin_notify_reply(chat_types: dict[str, bool]) -> ReplyKeyboardMarkup:
-    prep_label = (
-        "Чат W1 подготовка: ✅" if chat_types.get("preparation", True) else "Чат W1 подготовка: ⛔"
-    )
-    in_war_label = "Чат W2 война: ✅" if chat_types.get("inWar", True) else "Чат W2 война: ⛔"
-    ended_label = "Чат W3 итог: ✅" if chat_types.get("warEnded", True) else "Чат W3 итог: ⛔"
-    cwl_label = "Чат W4 ЛВК: ✅" if chat_types.get("cwlEnded", True) else "Чат W4 ЛВК: ⛔"
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text=prep_label), KeyboardButton(text=in_war_label)],
-            [KeyboardButton(text=ended_label), KeyboardButton(text=cwl_label)],
-            [KeyboardButton(text="Назад в админку")],
-        ],
-        resize_keyboard=True,
-    )
+def admin_notify_category_reply(category: str, settings: dict[str, bool]) -> ReplyKeyboardMarkup:
+    buttons: list[list[KeyboardButton]] = []
+    if category == "war":
+        buttons = [
+            [
+                KeyboardButton(
+                    text="КВ: подготовка → чат ✅" if settings.get("preparation", True) else "КВ: подготовка → чат ⛔"
+                ),
+                KeyboardButton(
+                    text="КВ: старт войны → чат ✅" if settings.get("start", True) else "КВ: старт войны → чат ⛔"
+                ),
+            ],
+            [
+                KeyboardButton(
+                    text="КВ: итоги → чат ✅" if settings.get("end", True) else "КВ: итоги → чат ⛔"
+                ),
+                KeyboardButton(
+                    text="КВ: напоминания → чат ✅" if settings.get("reminder", True) else "КВ: напоминания → чат ⛔"
+                ),
+            ],
+            [KeyboardButton(text="Создать напоминание КВ")],
+        ]
+    elif category == "cwl":
+        buttons = [
+            [
+                KeyboardButton(
+                    text="ЛВК: старт раунда → чат ✅"
+                    if settings.get("round_start", True)
+                    else "ЛВК: старт раунда → чат ⛔"
+                ),
+                KeyboardButton(
+                    text="ЛВК: конец раунда → чат ✅"
+                    if settings.get("round_end", True)
+                    else "ЛВК: конец раунда → чат ⛔"
+                ),
+            ],
+            [
+                KeyboardButton(
+                    text="ЛВК: напоминания → чат ✅"
+                    if settings.get("reminder", True)
+                    else "ЛВК: напоминания → чат ⛔"
+                ),
+                KeyboardButton(
+                    text="Итоги месяца → чат ✅"
+                    if settings.get("monthly_summary", True)
+                    else "Итоги месяца → чат ⛔"
+                ),
+            ],
+            [KeyboardButton(text="Создать напоминание ЛВК")],
+        ]
+    elif category == "capital":
+        buttons = [
+            [
+                KeyboardButton(
+                    text="Столица: старт рейдов → чат ✅"
+                    if settings.get("start", True)
+                    else "Столица: старт рейдов → чат ⛔"
+                ),
+                KeyboardButton(
+                    text="Столица: конец рейдов → чат ✅"
+                    if settings.get("end", True)
+                    else "Столица: конец рейдов → чат ⛔"
+                ),
+            ],
+            [
+                KeyboardButton(
+                    text="Столица: напоминания → чат ✅"
+                    if settings.get("reminder", True)
+                    else "Столица: напоминания → чат ⛔"
+                )
+            ],
+            [KeyboardButton(text="Создать напоминание столицы")],
+        ]
+    buttons.append([KeyboardButton(text="Назад")])
+    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 
 def admin_reminder_type_reply() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="Через N часов"), KeyboardButton(text="Время HH:MM")],
-            [KeyboardButton(text="Назад в админку")],
+            [KeyboardButton(text="Назад")],
         ],
         resize_keyboard=True,
     )

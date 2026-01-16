@@ -20,6 +20,7 @@ from bot.keyboards.common import admin_menu_reply, main_menu_reply, profile_menu
 from bot.services.coc_client import CocClient
 from bot.services.permissions import is_admin
 from bot.texts.help import build_help_text
+from bot.utils.navigation import reset_menu, set_menu
 from bot.utils.state import reset_state_if_any
 
 router = Router()
@@ -35,6 +36,7 @@ async def start_command(
     sessionmaker: async_sessionmaker,
 ) -> None:
     await reset_state_if_any(state)
+    await reset_menu(state)
     args = message.text.split(maxsplit=1)
     if len(args) > 1 and args[1] == "register" and message.chat.type == ChatType.PRIVATE:
         await start_registration(message, state, bot_username, config, sessionmaker)
@@ -62,6 +64,7 @@ async def me_command(
     sessionmaker: async_sessionmaker,
 ) -> None:
     await reset_state_if_any(state)
+    await reset_menu(state)
     user = await _get_user_profile(sessionmaker, message.from_user.id)
     logger.debug("profile lookup telegram_id=%s found=%s", message.from_user.id, bool(user))
     if not user:
@@ -84,6 +87,7 @@ async def whois_command(
     sessionmaker: async_sessionmaker,
 ) -> None:
     await reset_state_if_any(state)
+    await reset_menu(state)
     target_user = message.reply_to_message.from_user if message.reply_to_message else None
     username = None
     if target_user is None and message.text:
@@ -129,6 +133,7 @@ async def help_command(
     config: BotConfig,
 ) -> None:
     await reset_state_if_any(state)
+    await reset_menu(state)
     await message.answer(
         build_help_text(bot_username),
         parse_mode="Markdown",
@@ -144,6 +149,7 @@ async def help_button(
     config: BotConfig,
 ) -> None:
     await reset_state_if_any(state)
+    await reset_menu(state)
     await message.answer(
         build_help_text(bot_username),
         parse_mode="Markdown",
@@ -174,6 +180,7 @@ async def show_profile_button(
 @router.message(F.text == "Главное меню")
 async def main_menu_button(message: Message, state: FSMContext, config: BotConfig) -> None:
     await reset_state_if_any(state)
+    await reset_menu(state)
     await message.answer(
         "Главное меню.",
         reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
@@ -191,6 +198,7 @@ async def menu_callbacks(
 ) -> None:
     await callback.answer()
     await reset_state_if_any(state)
+    await reset_menu(state)
     if callback.data == "menu:register":
         await start_registration(callback.message, state, bot_username, config, sessionmaker)
     elif callback.data == "menu:me":
@@ -225,4 +233,5 @@ async def menu_callbacks(
                 reply_markup=main_menu_reply(is_admin(callback.from_user.id, config)),
             )
             return
+        await set_menu(state, "admin_menu")
         await callback.message.answer("Админ-панель.", reply_markup=admin_menu_reply())

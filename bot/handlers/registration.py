@@ -16,6 +16,7 @@ from bot.db import models
 from bot.keyboards.common import main_menu_reply, registration_reply
 from bot.services.coc_client import CocClient
 from bot.services.permissions import is_admin
+from bot.utils.navigation import reset_menu
 from bot.utils.state import reset_state_if_any
 from bot.utils.validators import is_valid_tag, normalize_tag
 
@@ -101,7 +102,15 @@ async def register_button(
 
 
 @router.message(RegisterState.waiting_tag)
-async def register_tag(message: Message, state: FSMContext) -> None:
+async def register_tag(message: Message, state: FSMContext, config: BotConfig) -> None:
+    if message.text == "Главное меню":
+        await state.clear()
+        await reset_menu(state)
+        await message.answer(
+            "Главное меню.",
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        )
+        return
     tag = normalize_tag(message.text or "")
     if not is_valid_tag(tag):
         await message.answer(
@@ -125,6 +134,14 @@ async def register_token(
     coc_client: CocClient,
     sessionmaker: async_sessionmaker,
 ) -> None:
+    if message.text == "Главное меню":
+        await state.clear()
+        await reset_menu(state)
+        await message.answer(
+            "Главное меню.",
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        )
+        return
     token = (message.text or "").strip()
     data = await state.get_data()
     player_tag = data.get("player_tag")
@@ -190,12 +207,11 @@ async def register_token(
                     player_name=player_data.get("name", ""),
                     clan_tag=clan_tag,
                     notify_pref={
-                        "dm_enabled": True,
-                        "dm_types": {
-                            "preparation": True,
-                            "inWar": True,
-                            "warEnded": True,
-                            "cwlEnded": False,
+                        "dm_enabled": False,
+                        "dm_categories": {
+                            "war": False,
+                            "cwl": False,
+                            "capital": False,
                         },
                         "dm_window": "always",
                     },

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import logging
 
 from aiogram import F, Router
@@ -8,17 +9,18 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.enums import ParseMode
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bot.config import BotConfig
 from bot.db import models
-from bot.keyboards.common import targets_admin_reply, targets_menu_reply
+from bot.keyboards.common import main_menu_reply, targets_admin_reply, targets_menu_reply
 from bot.keyboards.targets import targets_select_kb
 from bot.services.permissions import is_admin
 from bot.services.coc_client import CocClient
+from bot.utils.navigation import reset_menu
 from bot.utils.state import reset_state_if_any
 
 logger = logging.getLogger(__name__)
@@ -90,12 +92,7 @@ async def _load_claims(sessionmaker: async_sessionmaker, war_id: int) -> list[mo
 def _safe_text(value: str | None) -> str:
     if not value:
         return "?"
-    return (
-        value.replace("`", "'")
-        .replace("\n", " ")
-        .replace("|", "/")
-        .strip()
-    )
+    return value.replace("`", "'").replace("\n", " ").replace("|", "/").strip()
 
 
 def _truncate(value: str, max_len: int) -> str:
@@ -172,7 +169,7 @@ def _build_table_lines(
                 ]
             )
         )
-    return lines
+    return [html.escape(line) for line in lines]
 
 
 def _chunk_lines(lines: list[str], max_chars: int = 3400) -> list[list[str]]:
@@ -217,14 +214,13 @@ async def _build_table_messages(
     return ["\n".join(chunk) for chunk in chunks]
 
 
-async def _show_selection(
-    message: Message,
+async def _build_selection_markup(
     war: dict,
     war_row: models.War,
     sessionmaker: async_sessionmaker,
     user_id: int,
     admin_mode: bool,
-) -> None:
+) -> InlineKeyboardMarkup:
     enemies = _sorted_enemies(war.get("opponent", {}).get("members", []))
     claims = await _load_claims(sessionmaker, war_row.id)
     taken = {claim.enemy_position for claim in claims if claim.claimed_by_telegram_id != user_id}
@@ -238,10 +234,37 @@ async def _show_selection(
             if claim.external_player_name:
                 label = f"🔧 #{claim.enemy_position} {claim.external_player_name}"
             admin_rows.append((label, f"targets:admin-unclaim:{claim.enemy_position}"))
+    return targets_select_kb(enemies, taken, my_claims, admin_rows=admin_rows)
+
+
+async def _show_selection(
+    message: Message,
+    war: dict,
+    war_row: models.War,
+    sessionmaker: async_sessionmaker,
+    user_id: int,
+    admin_mode: bool,
+) -> None:
+    markup = await _build_selection_markup(war, war_row, sessionmaker, user_id, admin_mode)
     await message.answer(
         "Выберите противника:",
-        reply_markup=targets_select_kb(enemies, taken, my_claims, admin_rows=admin_rows),
+        reply_markup=markup,
     )
+
+
+async def _refresh_selection(
+    callback: CallbackQuery,
+    war: dict,
+    war_row: models.War,
+    sessionmaker: async_sessionmaker,
+    user_id: int,
+    admin_mode: bool,
+) -> None:
+    markup = await _build_selection_markup(war, war_row, sessionmaker, user_id, admin_mode)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=markup)
+    except TelegramBadRequest as exc:
+        logger.warning("Failed to update selection markup: %s", exc)
 
 
 @router.message(Command("targets"))
@@ -253,6 +276,7 @@ async def targets_command(
     sessionmaker: async_sessionmaker,
 ) -> None:
     await reset_state_if_any(state)
+    await reset_menu(state)
     await message.answer(
         "Раздел «Цели на войне».",
         reply_markup=_menu_reply(config, message.from_user.id),
@@ -326,12 +350,11 @@ async def targets_table_button(
     table_chunks = await _build_table_messages(enemies, claims, sessionmaker)
     reply_markup = _menu_reply(config, message.from_user.id)
     for index, chunk in enumerate(table_chunks):
-        formatted = f"```\n{chunk}\n```"
         try:
             await message.answer(
-                formatted,
+                f"<pre>{chunk}</pre>",
                 reply_markup=reply_markup if index == 0 else None,
-                parse_mode=ParseMode.MARKDOWN,
+                parse_mode=ParseMode.HTML,
             )
         except TelegramBadRequest as exc:
             logger.warning("Failed to send targets table, falling back: %s", exc)
@@ -368,85 +391,89 @@ async def target_claim(
             )
         ).scalar_one_or_none()
     if not user:
-        await callback.message.answer("Сначала зарегистрируйтесь через /register.")
-        await _safe_delete_message(
-            callback.message,
-            "Не удалось удалить сообщение. Проверьте права бота в чате.",
-        )
+        await callback.message.answer("Сначала зарегистрируйтесь. Нажмите «Регистрация».")
         return
 
     result_action = None
     try:
         async with sessionmaker() as session:
-            try:
-                async with session.begin():
-                    existing = (
-                        await session.execute(
-                            select(models.TargetClaim).where(
-                                models.TargetClaim.war_id == war_row.id,
-                                models.TargetClaim.enemy_position == position,
-                            )
-                        )
-                    ).scalar_one_or_none()
-                    if existing:
-                        if existing.claimed_by_telegram_id == user_id:
-                            await session.delete(existing)
-                            result_action = "unclaimed"
-                        else:
-                            holder = "другим игроком"
-                            if existing.external_player_name:
-                                holder = existing.external_player_name
-                            elif existing.claimed_by_telegram_id:
-                                holder_user = (
-                                    await session.execute(
-                                        select(models.User).where(
-                                            models.User.telegram_id == existing.claimed_by_telegram_id
-                                        )
-                                    )
-                                ).scalar_one_or_none()
-                                if holder_user:
-                                    holder_name = (
-                                        f"@{holder_user.username}"
-                                        if holder_user.username
-                                        else holder_user.player_name
-                                    )
-                                    holder = holder_name
-                            logger.info(
-                                "Target claim conflict (user_id=%s war_id=%s target_position=%s db_result=conflict)",
-                                user_id,
-                                war_row.id,
-                                position,
-                            )
-                            await callback.message.answer(f"Цель уже занята: {holder}.")
-                            await _safe_delete_message(
-                                callback.message,
-                                "Не удалось удалить сообщение. Проверьте права бота в чате.",
-                            )
-                            return
-                    else:
-                        claim_count = (
+            existing = (
+                await session.execute(
+                    select(models.TargetClaim).where(
+                        models.TargetClaim.war_id == war_row.id,
+                        models.TargetClaim.enemy_position == position,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing:
+                if existing.claimed_by_telegram_id == user_id:
+                    await session.delete(existing)
+                    result_action = "unclaimed"
+                else:
+                    holder = "другим игроком"
+                    if existing.external_player_name:
+                        holder = existing.external_player_name
+                    elif existing.claimed_by_telegram_id:
+                        holder_user = (
                             await session.execute(
-                                select(func.count()).select_from(models.TargetClaim).where(
-                                    models.TargetClaim.war_id == war_row.id,
-                                    models.TargetClaim.claimed_by_telegram_id == user_id,
+                                select(models.User).where(
+                                    models.User.telegram_id == existing.claimed_by_telegram_id
                                 )
                             )
-                        ).scalar_one()
-                        if claim_count >= 2:
-                            await callback.message.answer("Можно выбрать не более двух целей.")
-                            await _safe_delete_message(
-                                callback.message,
-                                "Не удалось удалить сообщение. Проверьте права бота в чате.",
+                        ).scalar_one_or_none()
+                        if holder_user:
+                            holder_name = (
+                                f"@{holder_user.username}"
+                                if holder_user.username
+                                else holder_user.player_name
                             )
-                            return
-                        session.add(
-                            models.TargetClaim(
-                                war_id=war_row.id,
-                                enemy_position=position,
-                                claimed_by_telegram_id=user_id,
-                            )
+                            holder = holder_name
+                    logger.info(
+                        "Target claim conflict (user_id=%s war_id=%s target_position=%s db_result=conflict)",
+                        user_id,
+                        war_row.id,
+                        position,
+                    )
+                    await callback.message.answer(f"Цель уже занята: {holder}.")
+                    await _refresh_selection(
+                        callback,
+                        war,
+                        war_row,
+                        sessionmaker,
+                        user_id,
+                        is_admin(user_id, config),
+                    )
+                    return
+            else:
+                claim_count = (
+                    await session.execute(
+                        select(func.count()).select_from(models.TargetClaim).where(
+                            models.TargetClaim.war_id == war_row.id,
+                            models.TargetClaim.claimed_by_telegram_id == user_id,
                         )
-                        result_action = "claimed"
+                    )
+                ).scalar_one()
+                if claim_count >= 2:
+                    await callback.message.answer("Можно выбрать не более двух целей.")
+                    await _refresh_selection(
+                        callback,
+                        war,
+                        war_row,
+                        sessionmaker,
+                        user_id,
+                        is_admin(user_id, config),
+                    )
+                    return
+                session.add(
+                    models.TargetClaim(
+                        war_id=war_row.id,
+                        enemy_position=position,
+                        claimed_by_telegram_id=user_id,
+                    )
+                )
+                result_action = "claimed"
+            try:
+                await session.commit()
             except IntegrityError:
                 await session.rollback()
                 logger.info(
@@ -456,9 +483,13 @@ async def target_claim(
                     position,
                 )
                 await callback.message.answer("Цель уже занята другим игроком.")
-                await _safe_delete_message(
-                    callback.message,
-                    "Не удалось удалить сообщение. Проверьте права бота в чате.",
+                await _refresh_selection(
+                    callback,
+                    war,
+                    war_row,
+                    sessionmaker,
+                    user_id,
+                    is_admin(user_id, config),
                 )
                 return
             if result_action == "claimed":
@@ -486,9 +517,13 @@ async def target_claim(
         await callback.message.answer("Не удалось обновить цель. Попробуйте позже.")
         return
 
-    await _safe_delete_message(
-        callback.message,
-        "Не удалось удалить сообщение. Проверьте права бота в чате.",
+    await _refresh_selection(
+        callback,
+        war,
+        war_row,
+        sessionmaker,
+        user_id,
+        is_admin(user_id, config),
     )
     if result_action == "unclaimed":
         await callback.message.answer(f"Цель #{position} освобождена.")
@@ -526,9 +561,13 @@ async def target_toggle(
             ).scalar_one_or_none()
             if not claim:
                 await callback.message.answer("Эта цель недоступна.")
-                await _safe_delete_message(
-                    callback.message,
-                    "Не удалось удалить сообщение. Проверьте права бота в чате.",
+                await _refresh_selection(
+                    callback,
+                    war,
+                    war_row,
+                    sessionmaker,
+                    user_id,
+                    is_admin(user_id, config),
                 )
                 return
             await session.delete(claim)
@@ -549,9 +588,13 @@ async def target_toggle(
         )
         await callback.message.answer("Не удалось обновить цель. Попробуйте позже.")
         return
-    await _safe_delete_message(
-        callback.message,
-        "Не удалось удалить сообщение. Проверьте права бота в чате.",
+    await _refresh_selection(
+        callback,
+        war,
+        war_row,
+        sessionmaker,
+        user_id,
+        is_admin(user_id, config),
     )
     await callback.message.answer(f"Цель #{position} освобождена.")
 
@@ -587,9 +630,13 @@ async def target_admin_unclaim(
             ).scalar_one_or_none()
             if not claim:
                 await callback.message.answer("Цель уже свободна.")
-                await _safe_delete_message(
-                    callback.message,
-                    "Не удалось удалить сообщение. Проверьте права бота в чате.",
+                await _refresh_selection(
+                    callback,
+                    war,
+                    war_row,
+                    sessionmaker,
+                    callback.from_user.id,
+                    True,
                 )
                 return
             await session.delete(claim)
@@ -610,9 +657,13 @@ async def target_admin_unclaim(
         )
         await callback.message.answer("Не удалось обновить цель. Попробуйте позже.")
         return
-    await _safe_delete_message(
-        callback.message,
-        "Не удалось удалить сообщение. Проверьте права бота в чате.",
+    await _refresh_selection(
+        callback,
+        war,
+        war_row,
+        sessionmaker,
+        callback.from_user.id,
+        True,
     )
     await callback.message.answer(f"Назначение для цели #{position} снято.")
 
@@ -681,6 +732,21 @@ async def targets_assign_name(
     coc_client: CocClient,
     sessionmaker: async_sessionmaker,
 ) -> None:
+    if message.text == "Главное меню":
+        await state.clear()
+        await reset_menu(state)
+        await message.answer(
+            "Главное меню.",
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        )
+        return
+    if message.text == "Назад":
+        await state.clear()
+        await message.answer(
+            "Действие отменено.",
+            reply_markup=_menu_reply(config, message.from_user.id),
+        )
+        return
     data = await state.get_data()
     position = data.get("assign_position")
     if not position:

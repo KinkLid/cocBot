@@ -13,6 +13,7 @@ from bot.keyboards.common import main_menu_reply, stats_menu_reply
 from bot.keyboards.seasons import seasons_kb
 from bot.services.coc_client import CocClient
 from bot.services.permissions import is_admin
+from bot.utils.navigation import reset_menu
 from bot.utils.state import reset_state_if_any
 
 router = Router()
@@ -103,6 +104,7 @@ async def mystats_command(
     coc_client: CocClient,
 ) -> None:
     await reset_state_if_any(state)
+    await reset_menu(state)
     async with sessionmaker() as session:
         user = (
             await session.execute(select(models.User).where(models.User.telegram_id == message.from_user.id))
@@ -134,6 +136,7 @@ async def mystats_command(
 @router.message(Command("stats"))
 async def stats_command(message: Message, state: FSMContext, config: BotConfig) -> None:
     await reset_state_if_any(state)
+    await reset_menu(state)
     if not is_admin(message.from_user.id, config):
         await message.answer(
             "Недостаточно прав.",
@@ -154,6 +157,7 @@ async def season_command(
     sessionmaker: async_sessionmaker,
 ) -> None:
     await reset_state_if_any(state)
+    await reset_menu(state)
     async with sessionmaker() as session:
         seasons = (
             await session.execute(select(models.Season.id, models.Season.name).order_by(models.Season.end_at.desc()))
