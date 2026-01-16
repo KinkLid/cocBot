@@ -17,24 +17,20 @@ from bot.db import models
 from bot.keyboards.common import (
     admin_action_reply,
     admin_menu_reply,
-    admin_notify_reply,
+    admin_notify_category_reply,
+    admin_notify_menu_reply,
     admin_reminder_type_reply,
     main_menu_reply,
 )
 from bot.services.coc_client import CocClient
-from bot.services.notifications import NotificationService
+from bot.services.notifications import NotificationService, normalize_chat_prefs
 from bot.services.permissions import is_admin
 from bot.utils.coc_time import parse_coc_time
+from bot.utils.navigation import pop_menu, reset_menu, set_menu
 from bot.utils.state import reset_state_if_any
 
 logger = logging.getLogger(__name__)
 router = Router()
-DEFAULT_CHAT_TYPES = {
-    "preparation": True,
-    "inWar": True,
-    "warEnded": True,
-    "cwlEnded": True,
-}
 
 
 class AdminState(StatesGroup):
@@ -44,6 +40,113 @@ class AdminState(StatesGroup):
     reminder_clock_value = State()
     reminder_text = State()
     reminder_confirm = State()
+
+
+async def _get_chat_prefs(
+    sessionmaker: async_sessionmaker,
+    config: BotConfig,
+) -> dict:
+    async with sessionmaker() as session:
+        settings = (
+            await session.execute(
+                select(models.ChatNotificationSetting).where(
+                    models.ChatNotificationSetting.chat_id == config.main_chat_id
+                )
+            )
+        ).scalar_one_or_none()
+        if not settings:
+            settings = models.ChatNotificationSetting(
+                chat_id=config.main_chat_id, preferences={}
+            )
+            session.add(settings)
+            await session.flush()
+        prefs = normalize_chat_prefs(settings.preferences)
+        settings.preferences = prefs
+        await session.commit()
+        return prefs
+
+
+async def _update_chat_pref(
+    sessionmaker: async_sessionmaker,
+    config: BotConfig,
+    category: str,
+    key: str,
+) -> dict:
+    async with sessionmaker() as session:
+        settings = (
+            await session.execute(
+                select(models.ChatNotificationSetting).where(
+                    models.ChatNotificationSetting.chat_id == config.main_chat_id
+                )
+            )
+        ).scalar_one_or_none()
+        if not settings:
+            settings = models.ChatNotificationSetting(
+                chat_id=config.main_chat_id, preferences={}
+            )
+            session.add(settings)
+            await session.flush()
+        prefs = normalize_chat_prefs(settings.preferences)
+        prefs[category][key] = not prefs[category].get(key, False)
+        settings.preferences = prefs
+        await session.commit()
+        return prefs
+
+
+async def _handle_admin_escape(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+) -> bool:
+    if message.text == "Главное меню":
+        await reset_state_if_any(state)
+        await reset_menu(state)
+        await message.answer(
+            "Главное меню.",
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        )
+        return True
+    if message.text == "Назад":
+        await reset_state_if_any(state)
+        await _show_admin_menu_for_stack(message, state, config, sessionmaker)
+        return True
+    return False
+
+
+async def _show_admin_menu_for_stack(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+) -> None:
+    data = await state.get_data()
+    stack = list(data.get("menu_stack", []))
+    current = stack[-1] if stack else None
+    if current == "admin_menu":
+        await message.answer("Админ-панель.", reply_markup=admin_menu_reply())
+        return
+    if current == "admin_notify_menu":
+        await message.answer("Уведомления: общий чат.", reply_markup=admin_notify_menu_reply())
+        return
+    if current in {"admin_notify_war", "admin_notify_cwl", "admin_notify_capital"}:
+        prefs = await _get_chat_prefs(sessionmaker, config)
+        category_map = {
+            "admin_notify_war": "war",
+            "admin_notify_cwl": "cwl",
+            "admin_notify_capital": "capital",
+        }
+        category = category_map[current]
+        await message.answer(
+            "Настройки уведомлений.",
+            reply_markup=admin_notify_category_reply(category, prefs.get(category, {})),
+        )
+        return
+    await reset_menu(state)
+    await message.answer(
+        "Главное меню.",
+        reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+    )
 
 @router.message(Command("notifytest"))
 async def admin_notify_test(
@@ -63,7 +166,8 @@ async def admin_notify_test(
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
         await message.answer(
-            "Использование: /notifytest preparation|inWar|warEnded|cwlEnded",
+            "Укажите тип уведомления: war_preparation, war_start, war_end, cwl_round_start, cwl_round_end, "
+            "capital_start, capital_end.",
             reply_markup=admin_menu_reply(),
         )
         return
@@ -106,6 +210,8 @@ async def admin_panel_button(
             reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
         )
         return
+    await reset_menu(state)
+    await set_menu(state, "admin_menu")
     await message.answer("Админ-панель.", reply_markup=admin_menu_reply())
 
 
@@ -153,8 +259,12 @@ async def diagnostics_button(
 
 
 @router.message(F.text == "Назад")
-async def admin_back(message: Message, state: FSMContext, config: BotConfig) -> None:
-    current_state = await state.get_state()
+async def admin_back(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+) -> None:
     await reset_state_if_any(state)
     logger.info("Admin back pressed by user_id=%s", message.from_user.id)
     if not is_admin(message.from_user.id, config):
@@ -163,17 +273,52 @@ async def admin_back(message: Message, state: FSMContext, config: BotConfig) -> 
             reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
         )
         return
-    if current_state:
+    previous = await pop_menu(state)
+    if previous == "admin_menu":
         await message.answer("Админ-панель.", reply_markup=admin_menu_reply())
         return
+    if previous == "admin_notify_menu":
+        await message.answer("Уведомления: общий чат.", reply_markup=admin_notify_menu_reply())
+        return
+    if previous in {"admin_notify_war", "admin_notify_cwl", "admin_notify_capital"}:
+        category_map = {
+            "admin_notify_war": "war",
+            "admin_notify_cwl": "cwl",
+            "admin_notify_capital": "capital",
+        }
+        prefs = await _get_chat_prefs(sessionmaker, config)
+        category = category_map[previous]
+        await message.answer(
+            "Настройки уведомлений.",
+            reply_markup=admin_notify_category_reply(category, prefs.get(category, {})),
+        )
+        return
+    await reset_menu(state)
     await message.answer(
         "Главное меню.",
         reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
     )
 
 
-@router.message(F.text == "Настройки уведомлений чата")
-async def admin_notify_settings(
+@router.message(F.text == "Уведомления")
+async def admin_notify_menu(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+) -> None:
+    await reset_state_if_any(state)
+    if not is_admin(message.from_user.id, config):
+        await message.answer(
+            "Админ-панель доступна только администраторам.",
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        )
+        return
+    await set_menu(state, "admin_notify_menu")
+    await message.answer("Уведомления: общий чат.", reply_markup=admin_notify_menu_reply())
+
+
+@router.message(F.text.in_({"Клановые войны (чат)", "ЛВК (чат)", "Рейды столицы (чат)"}))
+async def admin_notify_category(
     message: Message,
     state: FSMContext,
     config: BotConfig,
@@ -186,31 +331,28 @@ async def admin_notify_settings(
             reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
         )
         return
-    async with sessionmaker() as session:
-        settings = (
-            await session.execute(
-                select(models.ChatNotificationSetting).where(
-                    models.ChatNotificationSetting.chat_id == config.main_chat_id
-                )
-            )
-        ).scalar_one_or_none()
-        if not settings:
-            settings = models.ChatNotificationSetting(
-                chat_id=config.main_chat_id, preferences={"types": DEFAULT_CHAT_TYPES}
-            )
-            session.add(settings)
-            await session.commit()
-        chat_types = dict(settings.preferences or {}).get("types", {})
+    category_map = {
+        "Клановые войны (чат)": ("war", "admin_notify_war"),
+        "ЛВК (чат)": ("cwl", "admin_notify_cwl"),
+        "Рейды столицы (чат)": ("capital", "admin_notify_capital"),
+    }
+    category, menu_key = category_map.get(message.text, (None, None))
+    if not category:
+        return
+    prefs = await _get_chat_prefs(sessionmaker, config)
+    await set_menu(state, menu_key)
     await message.answer(
-        "Настройки уведомлений чата.",
-        reply_markup=admin_notify_reply(chat_types),
+        "Настройки уведомлений.",
+        reply_markup=admin_notify_category_reply(category, prefs.get(category, {})),
     )
 
 
-@router.message(F.text.startswith("Чат W1 подготовка"))
-@router.message(F.text.startswith("Чат W2 война"))
-@router.message(F.text.startswith("Чат W3 итог"))
-@router.message(F.text.startswith("Чат W4 ЛВК"))
+@router.message(
+    F.text.startswith("КВ:")
+    | F.text.startswith("ЛВК:")
+    | F.text.startswith("Столица:")
+    | F.text.startswith("Итоги месяца")
+)
 async def admin_notify_toggle(
     message: Message,
     state: FSMContext,
@@ -224,60 +366,41 @@ async def admin_notify_toggle(
             reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
         )
         return
+    text = message.text or ""
     mapping = {
-        "Чат W1 подготовка": "preparation",
-        "Чат W2 война": "inWar",
-        "Чат W3 итог": "warEnded",
-        "Чат W4 ЛВК": "cwlEnded",
+        "КВ: подготовка": ("war", "preparation"),
+        "КВ: старт войны": ("war", "start"),
+        "КВ: итоги": ("war", "end"),
+        "КВ: напоминания": ("war", "reminder"),
+        "ЛВК: старт раунда": ("cwl", "round_start"),
+        "ЛВК: конец раунда": ("cwl", "round_end"),
+        "ЛВК: напоминания": ("cwl", "reminder"),
+        "Итоги месяца": ("cwl", "monthly_summary"),
+        "Столица: старт рейдов": ("capital", "start"),
+        "Столица: конец рейдов": ("capital", "end"),
+        "Столица: напоминания": ("capital", "reminder"),
     }
-    label = message.text.split(":")[0].strip()
-    key = mapping.get(label)
-    if not key:
-        await message.answer("Неизвестный тип.")
+    key = None
+    category = None
+    for prefix, (cat, name) in mapping.items():
+        if text.startswith(prefix):
+            category = cat
+            key = name
+            break
+    if not category or not key:
+        await message.answer("Не удалось определить тип.")
         return
-    async with sessionmaker() as session:
-        settings = (
-            await session.execute(
-                select(models.ChatNotificationSetting).where(
-                    models.ChatNotificationSetting.chat_id == config.main_chat_id
-                )
-            )
-        ).scalar_one_or_none()
-        if not settings:
-            settings = models.ChatNotificationSetting(
-                chat_id=config.main_chat_id, preferences={"types": DEFAULT_CHAT_TYPES}
-            )
-            session.add(settings)
-        prefs = dict(settings.preferences or {})
-        types = dict(prefs.get("types", {}))
-        types[key] = not types.get(key, True)
-        prefs["types"] = types
-        settings.preferences = prefs
-        await session.commit()
+    prefs = await _update_chat_pref(sessionmaker, config, category, key)
     await message.answer(
         "Настройки обновлены.",
-        reply_markup=admin_notify_reply(types),
+        reply_markup=admin_notify_category_reply(category, prefs.get(category, {})),
     )
 
 
-@router.message(F.text == "Назад в админку")
-async def admin_notify_back(
-    message: Message,
-    state: FSMContext,
-    config: BotConfig,
-) -> None:
-    await reset_state_if_any(state)
-    if not is_admin(message.from_user.id, config):
-        await message.answer(
-            "Главное меню.",
-            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
-        )
-        return
-    await message.answer("Админ-панель.", reply_markup=admin_menu_reply())
-
-
-@router.message(F.text == "Создать напоминание о войне")
-async def admin_create_war_reminder(
+@router.message(
+    F.text.in_({"Создать напоминание КВ", "Создать напоминание ЛВК", "Создать напоминание столицы"})
+)
+async def admin_create_reminder(
     message: Message,
     state: FSMContext,
     config: BotConfig,
@@ -289,6 +412,16 @@ async def admin_create_war_reminder(
             reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
         )
         return
+    category_map = {
+        "Создать напоминание КВ": "war",
+        "Создать напоминание ЛВК": "cwl",
+        "Создать напоминание столицы": "capital",
+    }
+    category = category_map.get(message.text)
+    if not category:
+        await message.answer("Не удалось определить тип напоминания.", reply_markup=admin_menu_reply())
+        return
+    await state.update_data(reminder_category=category)
     await state.set_state(AdminState.reminder_time_type)
     await message.answer(
         "Когда отправить напоминание?",
@@ -301,12 +434,15 @@ async def admin_reminder_time_type(
     message: Message,
     state: FSMContext,
     config: BotConfig,
+    sessionmaker: async_sessionmaker,
 ) -> None:
     if not is_admin(message.from_user.id, config):
         await message.answer(
             "Админ-панель доступна только администраторам.",
             reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
         )
+        return
+    if await _handle_admin_escape(message, state, config, sessionmaker):
         return
     text = (message.text or "").strip().lower()
     if text.startswith("через"):
@@ -327,12 +463,15 @@ async def admin_reminder_delay_value(
     message: Message,
     state: FSMContext,
     config: BotConfig,
+    sessionmaker: async_sessionmaker,
 ) -> None:
     if not is_admin(message.from_user.id, config):
         await message.answer(
             "Админ-панель доступна только администраторам.",
             reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
         )
+        return
+    if await _handle_admin_escape(message, state, config, sessionmaker):
         return
     text = (message.text or "").strip()
     if not text.isdigit() or int(text) <= 0:
@@ -348,12 +487,15 @@ async def admin_reminder_clock_value(
     message: Message,
     state: FSMContext,
     config: BotConfig,
+    sessionmaker: async_sessionmaker,
 ) -> None:
     if not is_admin(message.from_user.id, config):
         await message.answer(
             "Админ-панель доступна только администраторам.",
             reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
         )
+        return
+    if await _handle_admin_escape(message, state, config, sessionmaker):
         return
     text = (message.text or "").strip()
     if len(text.split(":")) != 2:
@@ -378,12 +520,15 @@ async def admin_reminder_text(
     message: Message,
     state: FSMContext,
     config: BotConfig,
+    sessionmaker: async_sessionmaker,
 ) -> None:
     if not is_admin(message.from_user.id, config):
         await message.answer(
             "Админ-панель доступна только администраторам.",
             reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
         )
+        return
+    if await _handle_admin_escape(message, state, config, sessionmaker):
         return
     text = (message.text or "").strip()
     if not text:
@@ -416,66 +561,124 @@ async def admin_reminder_confirm(
             reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
         )
         return
+    if await _handle_admin_escape(message, state, config, sessionmaker):
+        return
     if (message.text or "").strip().lower() not in {"да", "yes", "ок", "ok"}:
         await state.clear()
         await message.answer("Отмена.", reply_markup=admin_menu_reply())
         return
     data = await state.get_data()
-    try:
-        war_data = await coc_client.get_current_war(config.clan_tag)
-    except Exception as exc:  # noqa: BLE001
+    category = data.get("reminder_category")
+    if category not in {"war", "cwl", "capital"}:
         await state.clear()
-        await message.answer(
-            f"Не удалось получить данные о войне: {exc}",
-            reply_markup=admin_menu_reply(),
-        )
+        await message.answer("Не удалось определить раздел напоминания.", reply_markup=admin_menu_reply())
         return
-    if war_data.get("state") not in {"preparation", "inWar"}:
-        await state.clear()
-        await message.answer("Сейчас нет активной войны.", reply_markup=admin_menu_reply())
-        return
-    war_tag = war_data.get("tag") or war_data.get("clan", {}).get("tag")
-    start_at = parse_coc_time(war_data.get("startTime"))
-    async with sessionmaker() as session:
-        war = None
-        if war_tag:
-            war = (
-                await session.execute(select(models.War).where(models.War.war_tag == war_tag))
-            ).scalar_one_or_none()
-        if not war:
-            war = models.War(
-                war_tag=war_tag,
-                war_type=war_data.get("warType", "unknown"),
-                state=war_data.get("state", "unknown"),
-                start_at=start_at,
-                end_at=parse_coc_time(war_data.get("endTime")),
-                opponent_name=war_data.get("opponent", {}).get("name"),
-                opponent_tag=war_data.get("opponent", {}).get("tag"),
-                league_name=war_data.get("league", {}).get("name"),
+
+    context: dict = {}
+    start_at: datetime | None = None
+    if category == "war":
+        try:
+            war_data = await coc_client.get_current_war(config.clan_tag)
+        except Exception as exc:  # noqa: BLE001
+            await state.clear()
+            await message.answer(
+                f"Не удалось получить данные о войне: {exc}",
+                reply_markup=admin_menu_reply(),
             )
-            session.add(war)
-            await session.flush()
-        if data.get("reminder_mode") == "delay":
-            base_time = start_at or datetime.now(timezone.utc)
-            fire_at = base_time + timedelta(hours=int(data["reminder_value"]))
-        else:
-            zone = ZoneInfo(config.timezone)
-            now = datetime.now(zone)
-            clock_value = data["reminder_value"]
-            hour, minute = [int(x) for x in clock_value.split(":")]
-            target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            if target <= now:
-                target = target + timedelta(days=1)
-            fire_at = target.astimezone(timezone.utc)
-        reminder = models.WarReminder(
-            war_id=war.id,
-            fire_at=fire_at,
-            message_text=data.get("reminder_text"),
-            created_by=message.from_user.id,
-            status="pending",
+            return
+        if war_data.get("state") not in {"preparation", "inWar"}:
+            await state.clear()
+            await message.answer("Сейчас нет активной войны.", reply_markup=admin_menu_reply())
+            return
+        war_tag = war_data.get("tag") or war_data.get("clan", {}).get("tag")
+        context = {"war_tag": war_tag}
+        start_at = parse_coc_time(war_data.get("startTime"))
+        event_type = "war_reminder"
+    elif category == "cwl":
+        try:
+            league = await coc_client.get_league_group(config.clan_tag)
+        except Exception as exc:  # noqa: BLE001
+            await state.clear()
+            await message.answer(
+                f"Не удалось получить данные ЛВК: {exc}",
+                reply_markup=admin_menu_reply(),
+            )
+            return
+        war_tag = None
+        war_data = None
+        for round_item in league.get("rounds", []):
+            for tag in round_item.get("warTags", []):
+                if tag and tag != "#0":
+                    try:
+                        war_data = await coc_client.get_cwl_war(tag)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if war_data and war_data.get("state") in {"preparation", "inWar"}:
+                        war_tag = tag
+                        break
+            if war_tag:
+                break
+        if not war_tag or not war_data:
+            await state.clear()
+            await message.answer("Нет активного раунда ЛВК.", reply_markup=admin_menu_reply())
+            return
+        context = {"cwl_war_tag": war_tag, "season": league.get("season")}
+        start_at = parse_coc_time(war_data.get("startTime"))
+        event_type = "cwl_reminder"
+    else:
+        try:
+            raids = await coc_client.get_capital_raid_seasons(config.clan_tag)
+        except Exception as exc:  # noqa: BLE001
+            await state.clear()
+            await message.answer(
+                f"Не удалось получить рейды столицы: {exc}",
+                reply_markup=admin_menu_reply(),
+            )
+            return
+        items = raids.get("items", [])
+        if not items:
+            await state.clear()
+            await message.answer("Нет данных о рейдах.", reply_markup=admin_menu_reply())
+            return
+        latest = items[0]
+        raid_id = latest.get("startTime") or latest.get("endTime") or "raid"
+        start_at = parse_coc_time(latest.get("startTime"))
+        end_at = parse_coc_time(latest.get("endTime"))
+        now = datetime.now(timezone.utc)
+        if not start_at or not end_at or not (start_at <= now <= end_at):
+            await state.clear()
+            await message.answer("Сейчас нет активного рейд-уикенда.", reply_markup=admin_menu_reply())
+            return
+        context = {"raid_id": raid_id}
+        event_type = "capital_reminder"
+
+    if data.get("reminder_mode") == "delay":
+        base_time = start_at or datetime.now(timezone.utc)
+        fire_at = base_time + timedelta(hours=int(data["reminder_value"]))
+    else:
+        zone = ZoneInfo(config.timezone)
+        now = datetime.now(zone)
+        clock_value = data["reminder_value"]
+        hour, minute = [int(x) for x in clock_value.split(":")]
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if target <= now:
+            target = target + timedelta(days=1)
+        fire_at = target.astimezone(timezone.utc)
+
+    async with sessionmaker() as session:
+        session.add(
+            models.ScheduledNotification(
+                category=category,
+                event_type=event_type,
+                fire_at=fire_at,
+                message_text=data.get("reminder_text"),
+                created_by=message.from_user.id,
+                status="pending",
+                context=context,
+            )
         )
-        session.add(reminder)
         await session.commit()
+
     await state.clear()
     await message.answer("Напоминание сохранено.", reply_markup=admin_menu_reply())
 
@@ -492,6 +695,8 @@ async def wipe_target(
             "Админ-панель доступна только администраторам.",
             reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
         )
+        return
+    if await _handle_admin_escape(message, state, config, sessionmaker):
         return
 
     target_user = message.reply_to_message.from_user if message.reply_to_message else None

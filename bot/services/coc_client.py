@@ -60,6 +60,9 @@ class CocClient:
     async def get_league_group(self, clan_tag: str) -> dict[str, Any]:
         return await self._get(f"/clans/{quote(clan_tag)}/currentwar/leaguegroup")
 
+    async def get_cwl_war(self, war_tag: str) -> dict[str, Any]:
+        return await self._get(f"/clanwarleagues/wars/{quote(war_tag)}")
+
     async def get_warlog(self, clan_tag: str) -> dict[str, Any]:
         return await self._get(f"/clans/{quote(clan_tag)}/warlog")
 

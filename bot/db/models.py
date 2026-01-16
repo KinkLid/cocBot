@@ -190,3 +190,38 @@ class CwlState(Base):
     state: Mapped[str] = mapped_column(String(16))
     notified: Mapped[bool] = mapped_column(Boolean, default=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class CwlWarState(Base):
+    __tablename__ = "cwl_war_states"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    season: Mapped[str] = mapped_column(String(16))
+    war_tag: Mapped[str] = mapped_column(String(32), unique=True)
+    state: Mapped[str] = mapped_column(String(16))
+    last_notified_state: Mapped[Optional[str]] = mapped_column(String(16))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class CapitalRaidState(Base):
+    __tablename__ = "capital_raid_states"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    raid_id: Mapped[str] = mapped_column(String(64), unique=True)
+    state: Mapped[str] = mapped_column(String(16))
+    last_notified_state: Mapped[Optional[str]] = mapped_column(String(16))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class ScheduledNotification(Base):
+    __tablename__ = "scheduled_notifications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    category: Mapped[str] = mapped_column(String(16))
+    event_type: Mapped[str] = mapped_column(String(32))
+    fire_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    message_text: Mapped[str] = mapped_column(Text)
+    created_by: Mapped[Optional[int]] = mapped_column(BigInteger)
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    context: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
