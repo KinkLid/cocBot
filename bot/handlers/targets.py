@@ -172,8 +172,6 @@ def _build_table_lines(
                 ]
             )
         )
-    lines.append("")
-    lines.append("Флажки в игре API не предоставляет.")
     return lines
 
 
@@ -207,17 +205,14 @@ async def _build_table_messages(
         return ["\n".join(lines)]
 
     header_lines = lines[:4]
-    footer_lines = lines[-2:]
-    data_lines = lines[4:-2]
+    data_lines = lines[4:]
     chunks: list[list[str]] = []
     if not data_lines:
         chunks = [lines]
     else:
         data_chunks = _chunk_lines(data_lines)
-        for index, chunk in enumerate(data_chunks):
+        for chunk in data_chunks:
             combined = [*header_lines, *chunk]
-            if index == len(data_chunks) - 1:
-                combined.extend(footer_lines)
             chunks.append(combined)
     return ["\n".join(chunk) for chunk in chunks]
 

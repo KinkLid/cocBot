@@ -16,6 +16,23 @@ from bot.utils.state import reset_state_if_any
 
 router = Router()
 
+DEFAULT_DM_TYPES = {
+    "preparation": True,
+    "inWar": True,
+    "warEnded": True,
+    "cwlEnded": False,
+}
+
+
+def _normalize_notify_pref(pref: dict | None) -> dict:
+    pref = dict(pref or {})
+    pref.setdefault("dm_enabled", False)
+    types = dict(DEFAULT_DM_TYPES)
+    types.update(pref.get("dm_types", {}) or {})
+    pref["dm_types"] = types
+    pref.setdefault("dm_window", "always")
+    return pref
+
 
 @router.message(Command("notify"))
 async def notify_command(
@@ -35,11 +52,11 @@ async def notify_command(
                 reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
             )
             return
-        prefs = dict(user.notify_pref or {})
+        prefs = _normalize_notify_pref(user.notify_pref)
         dm_enabled = bool(prefs.get("dm_enabled", False))
     await message.answer(
-        f"Уведомления в общий чат приходят всегда. ЛС: {'✅ включены' if dm_enabled else '⛔ выключены'}.",
-        reply_markup=notify_menu_reply(dm_enabled),
+        f"ЛС: {'✅ включены' if dm_enabled else '⛔ выключены'}. Настройте типы и время.",
+        reply_markup=notify_menu_reply(dm_enabled, prefs["dm_types"], prefs["dm_window"]),
     )
 
 
@@ -73,7 +90,7 @@ async def notify_toggle_dm_button(
                 reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
             )
             return
-        prefs = dict(user.notify_pref or {})
+        prefs = _normalize_notify_pref(user.notify_pref)
         dm_enabled = bool(prefs.get("dm_enabled", False))
         new_state = not dm_enabled if message.text == "Включить ЛС" else False
         if dm_enabled and message.text == "Выключить ЛС":
@@ -81,10 +98,16 @@ async def notify_toggle_dm_button(
         elif not dm_enabled and message.text == "Включить ЛС":
             new_state = True
         elif dm_enabled and message.text == "Включить ЛС":
-            await message.answer("ЛС уже включены.", reply_markup=notify_menu_reply(dm_enabled))
+            await message.answer(
+                "ЛС уже включены.",
+                reply_markup=notify_menu_reply(dm_enabled, prefs["dm_types"], prefs["dm_window"]),
+            )
             return
         elif not dm_enabled and message.text == "Выключить ЛС":
-            await message.answer("ЛС уже выключены.", reply_markup=notify_menu_reply(dm_enabled))
+            await message.answer(
+                "ЛС уже выключены.",
+                reply_markup=notify_menu_reply(dm_enabled, prefs["dm_types"], prefs["dm_window"]),
+            )
             return
         prefs["dm_enabled"] = new_state
         user.notify_pref = prefs
@@ -109,20 +132,98 @@ async def notify_toggle_dm_button(
                     await session.commit()
             await message.answer(
                 "Не могу писать в ЛС. Откройте ЛС и включите снова.",
-                reply_markup=notify_menu_reply(False),
+                reply_markup=notify_menu_reply(False, prefs["dm_types"], prefs["dm_window"]),
             )
             return
         await message.answer(
             "Готово! ЛС включены.",
-            reply_markup=notify_menu_reply(True),
+            reply_markup=notify_menu_reply(True, prefs["dm_types"], prefs["dm_window"]),
         )
         return
     await message.answer(
         "Готово! ЛС выключены.",
-        reply_markup=notify_menu_reply(False),
+        reply_markup=notify_menu_reply(False, prefs["dm_types"], prefs["dm_window"]),
     )
 
 
 @router.message(F.text.in_({"✅ ЛС включены", "⛔ ЛС выключены"}))
 async def notify_status_button(message: Message) -> None:
     await message.answer("Состояние уже выбрано.")
+
+
+@router.message(F.text.startswith("W1 подготовка"))
+@router.message(F.text.startswith("W2 война"))
+@router.message(F.text.startswith("W3 итог"))
+@router.message(F.text.startswith("W4 ЛВК"))
+async def notify_dm_type_toggle(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+) -> None:
+    await reset_state_if_any(state)
+    async with sessionmaker() as session:
+        user = (
+            await session.execute(select(models.User).where(models.User.telegram_id == message.from_user.id))
+        ).scalar_one_or_none()
+        if not user:
+            await message.answer(
+                "Вы ещё не зарегистрированы. Нажмите «Регистрация».",
+                reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+            )
+            return
+        prefs = _normalize_notify_pref(user.notify_pref)
+        label = message.text.split(":")[0].strip()
+        mapping = {
+            "W1 подготовка": "preparation",
+            "W2 война": "inWar",
+            "W3 итог": "warEnded",
+            "W4 ЛВК": "cwlEnded",
+        }
+        key = mapping.get(label)
+        if not key:
+            await message.answer("Неизвестный тип.")
+            return
+        prefs["dm_types"][key] = not prefs["dm_types"].get(key, False)
+        user.notify_pref = prefs
+        await session.commit()
+    await message.answer(
+        "Тип уведомлений обновлён.",
+        reply_markup=notify_menu_reply(
+            bool(prefs.get("dm_enabled", False)),
+            prefs["dm_types"],
+            prefs["dm_window"],
+        ),
+    )
+
+
+@router.message(F.text.startswith("Время ЛС:"))
+async def notify_dm_window_toggle(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+) -> None:
+    await reset_state_if_any(state)
+    async with sessionmaker() as session:
+        user = (
+            await session.execute(select(models.User).where(models.User.telegram_id == message.from_user.id))
+        ).scalar_one_or_none()
+        if not user:
+            await message.answer(
+                "Вы ещё не зарегистрированы. Нажмите «Регистрация».",
+                reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+            )
+            return
+        prefs = _normalize_notify_pref(user.notify_pref)
+        prefs["dm_window"] = "day" if prefs.get("dm_window") == "always" else "always"
+        user.notify_pref = prefs
+        await session.commit()
+    await message.answer(
+        "Окно доставки обновлено.",
+        reply_markup=notify_menu_reply(
+            bool(prefs.get("dm_enabled", False)),
+            prefs["dm_types"],
+            prefs["dm_window"],
+        ),
+    )

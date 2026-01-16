@@ -149,3 +149,44 @@ class TargetClaim(Base):
         UniqueConstraint("war_id", "enemy_position", name="uq_target_claim"),
         Index("idx_target_claim_war", "war_id"),
     )
+
+
+class ChatNotificationSetting(Base):
+    __tablename__ = "chat_notify_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, unique=True)
+    preferences: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class WarState(Base):
+    __tablename__ = "war_states"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    war_tag: Mapped[Optional[str]] = mapped_column(String(32), unique=True)
+    state: Mapped[str] = mapped_column(String(16))
+    last_notified_state: Mapped[Optional[str]] = mapped_column(String(16))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class WarReminder(Base):
+    __tablename__ = "war_reminders"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    war_id: Mapped[int] = mapped_column(Integer, ForeignKey("wars.id"))
+    fire_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    message_text: Mapped[str] = mapped_column(Text)
+    created_by: Mapped[int] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+
+
+class CwlState(Base):
+    __tablename__ = "cwl_states"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    season: Mapped[str] = mapped_column(String(16), unique=True)
+    state: Mapped[str] = mapped_column(String(16))
+    notified: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)

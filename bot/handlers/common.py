@@ -225,7 +225,4 @@ async def menu_callbacks(
                 reply_markup=main_menu_reply(is_admin(callback.from_user.id, config)),
             )
             return
-        await callback.message.answer(
-            "Админ-панель.",
-            reply_markup=admin_menu_reply(),
-        )
+        await callback.message.answer("Админ-панель.", reply_markup=admin_menu_reply())
