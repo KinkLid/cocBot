@@ -28,6 +28,8 @@ class User(Base):
     player_tag: Mapped[str] = mapped_column(String(16), unique=True)
     player_name: Mapped[str] = mapped_column(String(64))
     clan_tag: Mapped[str] = mapped_column(String(16))
+    last_clan_check_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    is_in_clan_cached: Mapped[Optional[bool]] = mapped_column(Boolean)
     role_flags: Mapped[int] = mapped_column(Integer, default=0)
     notify_pref: Mapped[dict] = mapped_column(JSONB, default=dict)
     last_stats_message_id: Mapped[Optional[int]] = mapped_column(Integer)

@@ -22,6 +22,7 @@ from bot.services.permissions import is_admin
 from bot.services.coc_client import CocClient
 from bot.utils.navigation import reset_menu
 from bot.utils.state import reset_state_if_any
+from bot.utils.validators import normalize_tag
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -45,6 +46,29 @@ async def _load_war(coc_client: CocClient, clan_tag: str) -> dict | None:
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to fetch war: %s", exc)
         return None
+
+
+def _is_active_war_state(state: str | None) -> bool:
+    return state in {"preparation", "inWar"}
+
+
+def _normalize_member_tag(tag: str | None) -> str | None:
+    if not tag:
+        return None
+    return normalize_tag(tag)
+
+
+def _is_user_in_war(user: models.User, war: dict) -> bool:
+    user_tag = _normalize_member_tag(user.player_tag)
+    if not user_tag:
+        return False
+    members = war.get("clan", {}).get("members", [])
+    member_tags = {
+        _normalize_member_tag(member.get("tag"))
+        for member in members
+        if member.get("tag")
+    }
+    return user_tag in member_tags
 
 
 async def _safe_delete_message(message: Message, notify_text: str | None = None) -> bool:
@@ -87,6 +111,13 @@ async def _load_claims(sessionmaker: async_sessionmaker, war_id: int) -> list[mo
         return (
             await session.execute(select(models.TargetClaim).where(models.TargetClaim.war_id == war_id))
         ).scalars().all()
+
+
+async def _load_user(sessionmaker: async_sessionmaker, telegram_id: int) -> models.User | None:
+    async with sessionmaker() as session:
+        return (
+            await session.execute(select(models.User).where(models.User.telegram_id == telegram_id))
+        ).scalar_one_or_none()
 
 
 def _safe_text(value: str | None) -> str:
@@ -305,11 +336,35 @@ async def targets_select_button(
     await reset_state_if_any(state)
     war = await _load_war(coc_client, config.clan_tag)
     if not war:
+        logger.info("Targets select blocked: war not active (reason=not_found)")
         await message.answer("Не удалось получить войну.", reply_markup=_menu_reply(config, message.from_user.id))
         return
     if war.get("state") != "preparation":
+        logger.info(
+            "Targets select blocked: war not active (state=%s)",
+            war.get("state"),
+        )
         await message.answer(
             "Выбор целей доступен только в подготовке.",
+            reply_markup=_menu_reply(config, message.from_user.id),
+        )
+        return
+    user = await _load_user(sessionmaker, message.from_user.id)
+    if not user:
+        logger.info("Targets select blocked: not registered (telegram_id=%s)", message.from_user.id)
+        await message.answer(
+            "Вы ещё не зарегистрированы. Нажмите «Регистрация».",
+            reply_markup=_menu_reply(config, message.from_user.id),
+        )
+        return
+    if not _is_user_in_war(user, war):
+        logger.info(
+            "Targets select blocked: not war participant (telegram_id=%s player_tag=%s)",
+            message.from_user.id,
+            user.player_tag,
+        )
+        await message.answer(
+            "Ты не участвуешь в этой войне, поэтому не можешь выбирать цели.",
             reply_markup=_menu_reply(config, message.from_user.id),
         )
         return
@@ -378,20 +433,27 @@ async def target_claim(
     user_id = callback.from_user.id
     war = await _load_war(coc_client, config.clan_tag)
     if not war:
+        logger.info("Target claim blocked: war not active (reason=not_found)")
         await callback.message.answer("Не удалось получить войну.")
         return
     if war.get("state") != "preparation":
+        logger.info("Target claim blocked: war not active (state=%s)", war.get("state"))
         await callback.message.answer("Выбор целей доступен только в подготовке.")
         return
     war_row = await _ensure_war_row(sessionmaker, war)
-    async with sessionmaker() as session:
-        user = (
-            await session.execute(
-                select(models.User).where(models.User.telegram_id == user_id)
-            )
-        ).scalar_one_or_none()
+    user = await _load_user(sessionmaker, user_id)
     if not user:
         await callback.message.answer("Сначала зарегистрируйтесь. Нажмите «Регистрация».")
+        return
+    if not _is_user_in_war(user, war):
+        logger.info(
+            "Target claim blocked: not war participant (telegram_id=%s player_tag=%s)",
+            user_id,
+            user.player_tag,
+        )
+        await callback.message.answer(
+            "Ты не участвуешь в этой войне, поэтому не можешь выбирать цели."
+        )
         return
 
     result_action = None
@@ -545,9 +607,28 @@ async def target_toggle(
     user_id = callback.from_user.id
     war = await _load_war(coc_client, config.clan_tag)
     if not war:
+        logger.info("Target toggle blocked: war not active (reason=not_found)")
         await callback.message.answer("Не удалось получить войну.")
         return
+    if war.get("state") != "preparation":
+        logger.info("Target toggle blocked: war not active (state=%s)", war.get("state"))
+        await callback.message.answer("Выбор целей доступен только в подготовке.")
+        return
     war_row = await _ensure_war_row(sessionmaker, war)
+    user = await _load_user(sessionmaker, user_id)
+    if not user:
+        await callback.message.answer("Сначала зарегистрируйтесь. Нажмите «Регистрация».")
+        return
+    if not _is_user_in_war(user, war):
+        logger.info(
+            "Target toggle blocked: not war participant (telegram_id=%s player_tag=%s)",
+            user_id,
+            user.player_tag,
+        )
+        await callback.message.answer(
+            "Ты не участвуешь в этой войне, поэтому не можешь выбирать цели."
+        )
+        return
     try:
         async with sessionmaker() as session:
             claim = (
@@ -682,11 +763,13 @@ async def targets_assign_other(
         return
     war = await _load_war(coc_client, config.clan_tag)
     if not war:
+        logger.info("Targets assign blocked: war not active (reason=not_found)")
         await message.answer("Не удалось получить войну.", reply_markup=_menu_reply(config, message.from_user.id))
         return
-    if war.get("state") != "preparation":
+    if not _is_active_war_state(war.get("state")):
+        logger.info("Targets assign blocked: war not active (state=%s)", war.get("state"))
         await message.answer(
-            "Выбор целей доступен только в подготовке.",
+            "Назначение целей доступно только во время активной войны.",
             reply_markup=_menu_reply(config, message.from_user.id),
         )
         return
@@ -707,7 +790,12 @@ async def targets_assign_other(
 async def targets_assign_select(
     callback: CallbackQuery,
     state: FSMContext,
+    config: BotConfig,
 ) -> None:
+    if not is_admin(callback.from_user.id, config):
+        await callback.answer("Доступно только администраторам.")
+        await callback.message.answer("Доступно только администраторам.")
+        return
     await callback.answer("Введите ник игрока…")
     position = int(callback.data.split(":")[2])
     await state.update_data(assign_position=position)
@@ -732,6 +820,10 @@ async def targets_assign_name(
     coc_client: CocClient,
     sessionmaker: async_sessionmaker,
 ) -> None:
+    if not is_admin(message.from_user.id, config):
+        await state.clear()
+        await message.answer("Доступно только администраторам.")
+        return
     if message.text == "Главное меню":
         await state.clear()
         await reset_menu(state)
@@ -759,8 +851,17 @@ async def targets_assign_name(
         return
     war = await _load_war(coc_client, config.clan_tag)
     if not war:
+        logger.info("Targets assign blocked: war not active (reason=not_found)")
         await state.clear()
         await message.answer("Не удалось получить войну.", reply_markup=_menu_reply(config, message.from_user.id))
+        return
+    if not _is_active_war_state(war.get("state")):
+        logger.info("Targets assign blocked: war not active (state=%s)", war.get("state"))
+        await state.clear()
+        await message.answer(
+            "Назначение целей доступно только во время активной войны.",
+            reply_markup=_menu_reply(config, message.from_user.id),
+        )
         return
     war_row = await _ensure_war_row(sessionmaker, war)
     try:
