@@ -27,6 +27,7 @@ from bot.services.notifications import NotificationService, normalize_chat_prefs
 from bot.services.permissions import is_admin
 from bot.utils.coc_time import parse_coc_time
 from bot.utils.navigation import pop_menu, reset_menu, set_menu
+from bot.utils.notify_time import format_duration_ru, parse_delay_to_minutes
 from bot.utils.state import reset_state_if_any
 
 logger = logging.getLogger(__name__)
@@ -448,7 +449,10 @@ async def admin_reminder_time_type(
     if text.startswith("через"):
         await state.update_data(reminder_mode="delay")
         await state.set_state(AdminState.reminder_delay_value)
-        await message.answer("Введите количество часов (например, 12).", reply_markup=admin_action_reply())
+        await message.answer(
+            "Введите время от старта события (например, 22h для 22 часов или 30m для 30 минут).",
+            reply_markup=admin_action_reply(),
+        )
         return
     if text.startswith("время"):
         await state.update_data(reminder_mode="clock")
@@ -473,13 +477,19 @@ async def admin_reminder_delay_value(
         return
     if await _handle_admin_escape(message, state, config, sessionmaker):
         return
-    text = (message.text or "").strip()
-    if not text.isdigit() or int(text) <= 0:
-        await message.answer("Введите положительное число часов.", reply_markup=admin_action_reply())
+    delay_minutes = parse_delay_to_minutes(message.text or "")
+    if not delay_minutes:
+        await message.answer(
+            "Введите время в формате 22h или 30m.",
+            reply_markup=admin_action_reply(),
+        )
         return
-    await state.update_data(reminder_value=int(text))
+    await state.update_data(reminder_value=delay_minutes)
     await state.set_state(AdminState.reminder_text)
-    await message.answer("Введите короткое описание напоминания.", reply_markup=admin_action_reply())
+    await message.answer(
+        "Введите короткое описание напоминания или '-' чтобы оставить только шаблон.",
+        reply_markup=admin_action_reply(),
+    )
 
 
 @router.message(AdminState.reminder_clock_value)
@@ -512,7 +522,10 @@ async def admin_reminder_clock_value(
         return
     await state.update_data(reminder_value=f"{hour:02d}:{minute:02d}")
     await state.set_state(AdminState.reminder_text)
-    await message.answer("Введите короткое описание напоминания.", reply_markup=admin_action_reply())
+    await message.answer(
+        "Введите короткое описание напоминания или '-' чтобы оставить только шаблон.",
+        reply_markup=admin_action_reply(),
+    )
 
 
 @router.message(AdminState.reminder_text)
@@ -532,16 +545,17 @@ async def admin_reminder_text(
         return
     text = (message.text or "").strip()
     if not text:
-        await message.answer("Нужно короткое описание.", reply_markup=admin_action_reply())
+        await message.answer("Нужно описание или '-'.", reply_markup=admin_action_reply())
         return
-    await state.update_data(reminder_text=text)
+    reminder_text = "" if text == "-" else text
+    await state.update_data(reminder_text=reminder_text)
     await state.set_state(AdminState.reminder_confirm)
     data = await state.get_data()
     await message.answer(
         f"Подтверждение:\n"
         f"Тип: {'через N часов' if data.get('reminder_mode') == 'delay' else 'время'}\n"
-        f"Значение: {data.get('reminder_value')}\n"
-        f"Текст: {text}\n"
+        f"Значение: {format_duration_ru(data.get('reminder_value')) if data.get('reminder_mode') == 'delay' else data.get('reminder_value')}\n"
+        f"Текст: {reminder_text or 'без текста'}\n"
         "Напишите 'да' для подтверждения.",
         reply_markup=admin_action_reply(),
     )
@@ -654,7 +668,10 @@ async def admin_reminder_confirm(
 
     if data.get("reminder_mode") == "delay":
         base_time = start_at or datetime.now(timezone.utc)
-        fire_at = base_time + timedelta(hours=int(data["reminder_value"]))
+        delay_minutes = int(data["reminder_value"])
+        context["delay_minutes"] = delay_minutes
+        context["scope"] = "chat"
+        fire_at = base_time + timedelta(minutes=delay_minutes)
     else:
         zone = ZoneInfo(config.timezone)
         now = datetime.now(zone)
@@ -664,6 +681,7 @@ async def admin_reminder_confirm(
         if target <= now:
             target = target + timedelta(days=1)
         fire_at = target.astimezone(timezone.utc)
+        context["scope"] = "chat"
 
     async with sessionmaker() as session:
         session.add(

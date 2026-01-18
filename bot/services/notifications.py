@@ -17,6 +17,7 @@ from bot.config import BotConfig
 from bot.db import models
 from bot.services.coc_client import CocClient
 from bot.utils.coc_time import parse_coc_time
+from bot.utils.notify_time import format_duration_ru
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +165,11 @@ class NotificationService:
                 try:
                     text = await self._build_reminder_message(reminder)
                     if text:
-                        await self._send_event(text, reminder.event_type)
+                        scope = reminder.context.get("scope", "chat")
+                        if scope == "dm":
+                            await self._send_reminder_dm(reminder, text)
+                        else:
+                            await self._send_chat_notification(text, reminder.event_type)
                         reminder.status = "sent"
                     else:
                         reminder.status = "canceled"
@@ -274,8 +279,8 @@ class NotificationService:
             dm_text = f"Началась подготовка к войне против {opponent}."
             notify_type = "war_preparation"
         elif state == "inWar":
-            text = f"<b>⚔️ Началась война против {opponent}.</b>"
-            dm_text = text
+            text = f"<b>⚔️ Началась Клановая война против {opponent}!</b>\nУдачи в бою!"
+            dm_text = f"Началась Клановая война против {opponent}! Удачи в бою!"
             notify_type = "war_start"
         else:
             clan = war_data.get("clan", {})
@@ -285,10 +290,13 @@ class NotificationService:
             destruction = None
             if clan.get("destructionPercentage") is not None:
                 destruction = f"{clan.get('destructionPercentage', 0)}% : {enemy.get('destructionPercentage', 0)}%"
-            text = f"<b>🏁 Война завершена: {result}</b>\nСчёт звёзд: {score}"
+            text = (
+                f"<b>🏁 КВ против {opponent} завершилась: {result}</b>\n"
+                f"Счёт звёзд: {score}"
+            )
             if destruction:
                 text += f"\nРазрушение: {destruction}"
-            dm_text = "Война закончилась. Итоги опубликованы в чате."
+            dm_text = f"КВ против {opponent} завершилась. Итоги опубликованы в чате."
             notify_type = "war_end"
 
         await self._send_chat_notification(text, notify_type)
@@ -415,19 +423,39 @@ class NotificationService:
 
     async def _build_reminder_message(self, reminder: models.ScheduledNotification) -> str | None:
         description = html.escape(reminder.message_text or "")
+        delay_minutes = reminder.context.get("delay_minutes")
+        delay_text = format_duration_ru(delay_minutes) if isinstance(delay_minutes, int) else None
         if reminder.category == "war":
             war_data = await self._coc.get_current_war(self._config.clan_tag)
             if reminder.context.get("war_tag") and war_data.get("tag") != reminder.context.get("war_tag"):
                 return None
+            opponent = html.escape(war_data.get("opponent", {}).get("name") or "противник")
             snapshot = _build_war_snapshot(war_data)
-            return f"<b>⏰ Напоминание о войне</b>\n{description}\n\n{snapshot}"
+            header = "⏰ Напоминание о войне"
+            if delay_text:
+                header = f"⏰ Прошло {delay_text} с начала войны против {opponent}"
+            parts = [f"<b>{header}</b>"]
+            if description:
+                parts.append(description)
+            parts.append("")
+            parts.append(snapshot)
+            return "\n".join(parts)
         if reminder.category == "cwl":
             war_tag = reminder.context.get("cwl_war_tag")
             if not war_tag:
                 return None
             war_data = await self._coc.get_cwl_war(war_tag)
+            opponent = html.escape(war_data.get("opponent", {}).get("name") or "противник")
             snapshot = _build_war_snapshot(war_data)
-            return f"<b>⏰ Напоминание ЛВК</b>\n{description}\n\n{snapshot}"
+            header = "⏰ Напоминание ЛВК"
+            if delay_text:
+                header = f"⏰ Прошло {delay_text} с начала раунда ЛВК против {opponent}"
+            parts = [f"<b>{header}</b>"]
+            if description:
+                parts.append(description)
+            parts.append("")
+            parts.append(snapshot)
+            return "\n".join(parts)
         if reminder.category == "capital":
             raids = await self._coc.get_capital_raid_seasons(self._config.clan_tag)
             items = raids.get("items", [])
@@ -435,22 +463,31 @@ class NotificationService:
                 return None
             latest = items[0]
             snapshot = _build_capital_snapshot(latest)
-            return f"<b>⏰ Напоминание по столице</b>\n{description}\n\n{snapshot}"
+            header = "⏰ Напоминание по столице"
+            if delay_text:
+                header = f"⏰ Прошло {delay_text} с начала рейдов столицы"
+            parts = [f"<b>{header}</b>"]
+            if description:
+                parts.append(description)
+            parts.append("")
+            parts.append(snapshot)
+            return "\n".join(parts)
         return None
 
     def _format_cwl_start(self, war: dict[str, Any]) -> str:
         opponent = html.escape(war.get("opponent", {}).get("name") or "противник")
-        return f"<b>🏰 ЛВК: старт раунда против {opponent}.</b>"
+        return f"<b>🏰 ЛВК: старт раунда против {opponent}!</b>"
 
     def _format_cwl_end(self, war: dict[str, Any]) -> str:
         clan = war.get("clan", {})
         enemy = war.get("opponent", {})
+        opponent = html.escape(enemy.get("name") or "противник")
         result = _format_war_result(clan, enemy)
         score = f"{clan.get('stars', 0)}:{enemy.get('stars', 0)}"
-        return f"<b>🏁 ЛВК: раунд завершён ({result}).</b>\nСчёт: {score}"
+        return f"<b>🏁 ЛВК против {opponent} завершён ({result}).</b>\nСчёт: {score}"
 
     def _format_capital_start(self, raid: dict[str, Any]) -> str:
-        return "<b>🏗 Старт рейд-уикенда столицы!</b>"
+        return "<b>🏗 Начались рейды клановой столицы!</b>"
 
     def _format_capital_end(self, raid: dict[str, Any]) -> str:
         snapshot = _build_capital_snapshot(raid)
@@ -459,6 +496,38 @@ class NotificationService:
     async def _send_event(self, text: str, notify_type: str) -> None:
         await self._send_chat_notification(text, notify_type)
         await self._send_dm_notifications(text, notify_type)
+
+    async def _send_reminder_dm(self, reminder: models.ScheduledNotification, text: str) -> None:
+        target_id = reminder.context.get("target_user_id")
+        if not target_id:
+            return
+        async with self._sessionmaker() as session:
+            user = (
+                await session.execute(
+                    select(models.User).where(models.User.telegram_id == target_id)
+                )
+            ).scalar_one_or_none()
+            if not user:
+                return
+            prefs = normalize_user_pref(user.notify_pref)
+            if not prefs.get("dm_enabled", False):
+                return
+            category = EVENT_CATEGORY_MAP.get(reminder.event_type, (None, None))[0]
+            if category and not prefs.get("dm_categories", {}).get(category, False):
+                return
+            if not _is_within_dm_window(prefs, self._config.timezone):
+                return
+            try:
+                await self._bot.send_message(
+                    chat_id=user.telegram_id,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                )
+            except TelegramForbiddenError:
+                prefs["dm_enabled"] = False
+                user.notify_pref = prefs
+                await session.commit()
+                logger.info("Disabled DM notifications for telegram_id=%s", user.telegram_id)
 
     async def _send_chat_notification(self, text: str, notify_type: str) -> None:
         if await self._chat_type_enabled(notify_type):
@@ -561,7 +630,7 @@ def _is_within_dm_window(pref: dict[str, Any], tz_name: str) -> bool:
         return True
     zone = ZoneInfo(tz_name)
     now_local = datetime.now(zone)
-    start = now_local.replace(hour=9, minute=0, second=0, microsecond=0)
+    start = now_local.replace(hour=8, minute=0, second=0, microsecond=0)
     end = now_local.replace(hour=22, minute=0, second=0, microsecond=0)
     return start <= now_local <= end
 
