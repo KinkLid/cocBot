@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message
@@ -32,9 +32,12 @@ async def ensure_registered_and_in_clan(
         ).scalar_one_or_none()
         if not user:
             return None, False
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         if user.last_clan_check_at and user.is_in_clan_cached is not None:
-            if now - user.last_clan_check_at <= ttl:
+            last_check = user.last_clan_check_at
+            if last_check.tzinfo is None:
+                last_check = last_check.replace(tzinfo=timezone.utc)
+            if now - last_check <= ttl:
                 return user, bool(user.is_in_clan_cached)
         try:
             player_data = await coc_client.get_player(user.player_tag)
