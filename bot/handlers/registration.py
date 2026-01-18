@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 from aiogram import F, Router
 from aiogram.enums import ChatType
@@ -198,6 +199,8 @@ async def register_token(
             existing.player_name = player_data.get("name", existing.player_name)
             existing.clan_tag = clan_tag
             existing.username = message.from_user.username
+            existing.last_clan_check_at = datetime.utcnow()
+            existing.is_in_clan_cached = True
         else:
             session.add(
                 models.User(
@@ -206,6 +209,8 @@ async def register_token(
                     player_tag=player_tag,
                     player_name=player_data.get("name", ""),
                     clan_tag=clan_tag,
+                    last_clan_check_at=datetime.utcnow(),
+                    is_in_clan_cached=True,
                     notify_pref={
                         "dm_enabled": False,
                         "dm_categories": {
