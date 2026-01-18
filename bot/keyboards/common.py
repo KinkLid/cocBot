@@ -59,30 +59,31 @@ def stats_menu_reply() -> ReplyKeyboardMarkup:
     )
 
 
-def notify_menu_reply(dm_enabled: bool, dm_window: str) -> ReplyKeyboardMarkup:
-    status = "ЛС: ✅ включены" if dm_enabled else "ЛС: ⛔ выключены"
-    toggle = "Выключить ЛС" if dm_enabled else "Включить ЛС"
-    window_label = "Время ЛС: всегда" if dm_window == "always" else "Время ЛС: день"
+def _dm_status_label(dm_enabled: bool) -> str:
+    return "🟢 Личные уведомления: ВКЛ" if dm_enabled else "🔴 Личные уведомления: ВЫКЛ"
+
+
+def _category_toggle_label(label: str, enabled: bool) -> str:
+    return f"{'✅' if enabled else '☑️'} {label} уведомления: {'ВКЛ' if enabled else 'ВЫКЛ'}"
+
+
+def notify_menu_reply(dm_enabled: bool, dm_window: str, categories: dict[str, bool]) -> ReplyKeyboardMarkup:
+    window_label = "Режим ЛС: всегда" if dm_window == "always" else "Режим ЛС: только днём"
+    war_label = _category_toggle_label("КВ", categories.get("war", False))
+    cwl_label = _category_toggle_label("ЛВК", categories.get("cwl", False))
+    capital_label = _category_toggle_label("Рейды", categories.get("capital", False))
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=status), KeyboardButton(text=toggle)],
-            [KeyboardButton(text="Клановые войны"), KeyboardButton(text="ЛВК")],
-            [KeyboardButton(text="Рейды столицы")],
+            [KeyboardButton(text=_dm_status_label(dm_enabled))],
+            [KeyboardButton(text=war_label), KeyboardButton(text=cwl_label)],
+            [KeyboardButton(text=capital_label)],
             [KeyboardButton(text=window_label)],
+            [
+                KeyboardButton(text="➕ Напоминание КВ"),
+                KeyboardButton(text="➕ Напоминание ЛВК"),
+            ],
+            [KeyboardButton(text="➕ Напоминание рейдов")],
             [KeyboardButton(text="Главное меню")],
-        ],
-        resize_keyboard=True,
-    )
-
-
-def notify_category_reply(category_label: str, dm_enabled: bool, category_enabled: bool) -> ReplyKeyboardMarkup:
-    status = "✅ получать в ЛС" if category_enabled and dm_enabled else "⛔ не получать в ЛС"
-    toggle = "Отключить ЛС для раздела" if category_enabled else "Включить ЛС для раздела"
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text=f"{category_label}: {status}")],
-            [KeyboardButton(text=toggle)],
-            [KeyboardButton(text="Назад к уведомлениям")],
         ],
         resize_keyboard=True,
     )
@@ -210,7 +211,7 @@ def admin_notify_category_reply(category: str, settings: dict[str, bool]) -> Rep
 def admin_reminder_type_reply() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="Через N часов"), KeyboardButton(text="Время HH:MM")],
+            [KeyboardButton(text="Через задержку"), KeyboardButton(text="Время HH:MM")],
             [KeyboardButton(text="Назад")],
         ],
         resize_keyboard=True,
