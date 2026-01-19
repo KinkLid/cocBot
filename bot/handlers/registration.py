@@ -201,6 +201,8 @@ async def register_token(
             existing.username = message.from_user.username
             existing.last_clan_check_at = datetime.now(timezone.utc)
             existing.is_in_clan_cached = True
+            if existing.first_seen_in_clan_at is None:
+                existing.first_seen_in_clan_at = datetime.now(timezone.utc)
         else:
             session.add(
                 models.User(
@@ -211,6 +213,7 @@ async def register_token(
                     clan_tag=clan_tag,
                     last_clan_check_at=datetime.now(timezone.utc),
                     is_in_clan_cached=True,
+                    first_seen_in_clan_at=datetime.now(timezone.utc),
                     notify_pref={
                         "dm_enabled": False,
                         "dm_categories": {

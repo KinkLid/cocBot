@@ -18,6 +18,7 @@ from bot.db import models
 from bot.services.coc_client import CocClient
 from bot.utils.coc_time import parse_coc_time
 from bot.utils.notify_time import format_duration_ru
+from bot.utils.war_attacks import build_missed_attacks_table, build_total_attacks_table, collect_missed_attacks
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +135,12 @@ class NotificationService:
             await session.commit()
 
         if previous_state != state and state in {"preparation", "inWar", "warEnded"}:
+            if state in {"preparation", "inWar"} and previous_state not in {"preparation", "inWar"}:
+                await self._schedule_rule_instances(
+                    event_type="war",
+                    event_id=war_tag,
+                    start_at=start_at,
+                )
             await self._notify_war_state(state, war_data)
             async with self._sessionmaker() as session:
                 await session.execute(
@@ -141,6 +148,8 @@ class NotificationService:
                     .where(models.WarState.war_tag == war_tag)
                     .values(last_notified_state=state, updated_at=datetime.now(timezone.utc))
                 )
+                if state == "warEnded" and war_tag:
+                    await self._cancel_rule_instances(session, war_tag)
                 await session.execute(
                     update(models.ScheduledNotification)
                     .where(models.ScheduledNotification.category == "war")
@@ -152,6 +161,7 @@ class NotificationService:
     async def dispatch_scheduled_notifications(self) -> None:
         now = datetime.now(timezone.utc)
         async with self._sessionmaker() as session:
+            await self._dispatch_rule_instances(session, now)
             reminders = (
                 await session.execute(
                     select(models.ScheduledNotification)
@@ -257,6 +267,11 @@ class NotificationService:
             if state == "active":
                 text = self._format_capital_start(latest)
                 await self._send_event(text, "capital_start")
+                await self._schedule_rule_instances(
+                    event_type="capital",
+                    event_id=raid_id,
+                    start_at=start_at,
+                )
             elif state == "ended":
                 text = self._format_capital_end(latest)
                 await self._send_event(text, "capital_end")
@@ -266,6 +281,8 @@ class NotificationService:
                     .where(models.CapitalRaidState.raid_id == raid_id)
                     .values(last_notified_state=state, updated_at=now)
                 )
+                if state == "ended":
+                    await self._cancel_rule_instances(session, raid_id)
                 await session.commit()
 
     async def _notify_war_state(self, state: str, war_data: dict[str, Any]) -> None:
@@ -283,8 +300,7 @@ class NotificationService:
             dm_text = f"Началась Клановая война против {opponent}! Удачи в бою!"
             notify_type = "war_start"
         else:
-            clan = war_data.get("clan", {})
-            enemy = war_data.get("opponent", {})
+            clan, enemy = _resolve_war_sides(war_data, self._config.clan_tag)
             result = _format_war_result(clan, enemy)
             score = f"{clan.get('stars', 0)}:{enemy.get('stars', 0)}"
             destruction = None
@@ -296,7 +312,14 @@ class NotificationService:
             )
             if destruction:
                 text += f"\nРазрушение: {destruction}"
-            dm_text = f"КВ против {opponent} завершилась. Итоги опубликованы в чате."
+            missing_table = _build_missing_attacks_section(
+                war_data,
+                self._config.clan_tag,
+                title="Кто не атаковал",
+            )
+            if missing_table:
+                text += f"\n\n{missing_table}"
+            dm_text = text
             notify_type = "war_end"
 
         await self._send_chat_notification(text, notify_type)
@@ -314,6 +337,10 @@ class NotificationService:
             sections.append(_format_top_list("🏗 Вклад в столицу", stats["capital"]))
         if not sections:
             sections.append("Данных пока недостаточно для топов.")
+        summary = await self._collect_cwl_attack_summary()
+        if summary:
+            sections.append("Кто сколько атак сделал:")
+            sections.append(summary)
         text = "\n\n".join([header, *sections])
         await self._send_chat_notification(text, "monthly_summary")
         await self._send_dm_notifications("ЛВК завершена. Итоги опубликованы в общем чате.", "monthly_summary")
@@ -387,6 +414,9 @@ class NotificationService:
 
         if war_state.last_notified_state != state and state in {"preparation", "inWar", "warEnded"}:
             if state in {"preparation", "inWar"}:
+                if war_state.last_notified_state not in {"preparation", "inWar"}:
+                    start_at = parse_coc_time(war.get("startTime"))
+                    await self._schedule_rule_instances("cwl", war_tag, start_at)
                 text = self._format_cwl_start(war)
                 await self._send_event(text, "cwl_round_start")
             else:
@@ -398,6 +428,8 @@ class NotificationService:
                     .where(models.CwlWarState.war_tag == war_tag)
                     .values(last_notified_state=state, updated_at=datetime.now(timezone.utc))
                 )
+                if state == "warEnded":
+                    await self._cancel_rule_instances(session, war_tag)
                 await session.commit()
 
     async def _find_current_cwl_war(self, league: dict[str, Any]) -> dict[str, Any] | None:
@@ -474,17 +506,230 @@ class NotificationService:
             return "\n".join(parts)
         return None
 
+    async def _schedule_rule_instances(
+        self,
+        event_type: str,
+        event_id: str | None,
+        start_at: datetime | None,
+    ) -> None:
+        if not event_id or not start_at:
+            return
+        async with self._sessionmaker() as session:
+            existing_rule_ids = set(
+                (
+                    await session.execute(
+                        select(models.NotificationInstance.rule_id).where(
+                            models.NotificationInstance.event_id == event_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            rules = (
+                await session.execute(
+                    select(models.NotificationRule).where(
+                        models.NotificationRule.event_type == event_type,
+                        models.NotificationRule.is_enabled.is_(True),
+                    )
+                )
+            ).scalars().all()
+            for rule in rules:
+                if rule.id in existing_rule_ids:
+                    continue
+                fire_at = start_at + timedelta(seconds=rule.delay_seconds)
+                session.add(
+                    models.NotificationInstance(
+                        rule_id=rule.id,
+                        event_id=event_id,
+                        fire_at=fire_at,
+                        status="pending",
+                        payload={},
+                    )
+                )
+            await session.commit()
+
+    async def _dispatch_rule_instances(
+        self,
+        session,
+        now: datetime,
+    ) -> None:
+        instances = (
+            await session.execute(
+                select(models.NotificationInstance, models.NotificationRule)
+                .join(models.NotificationRule, models.NotificationInstance.rule_id == models.NotificationRule.id)
+                .where(models.NotificationInstance.status == "pending")
+                .where(models.NotificationInstance.fire_at <= now)
+            )
+        ).all()
+        if not instances:
+            return
+        for instance, rule in instances:
+            if not rule.is_enabled:
+                instance.status = "canceled"
+                continue
+            text = await self._build_rule_message(instance, rule)
+            if not text:
+                instance.status = "canceled"
+                continue
+            try:
+                if rule.scope == "dm":
+                    await self._send_rule_dm(rule, text)
+                else:
+                    await self._bot.send_message(
+                        chat_id=rule.chat_id or self._config.main_chat_id,
+                        text=text,
+                        parse_mode=ParseMode.HTML,
+                    )
+                instance.status = "sent"
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to send rule instance %s: %s", instance.id, exc)
+                instance.status = "failed"
+
+    async def _cancel_rule_instances(self, session, event_id: str) -> None:
+        await session.execute(
+            update(models.NotificationInstance)
+            .where(models.NotificationInstance.event_id == event_id)
+            .where(models.NotificationInstance.status == "pending")
+            .values(status="canceled")
+        )
+
+    async def _send_rule_dm(self, rule: models.NotificationRule, text: str) -> None:
+        if not rule.user_id:
+            return
+        async with self._sessionmaker() as session:
+            user = (
+                await session.execute(
+                    select(models.User).where(models.User.telegram_id == rule.user_id)
+                )
+            ).scalar_one_or_none()
+            if not user:
+                return
+            prefs = normalize_user_pref(user.notify_pref)
+            if not prefs.get("dm_enabled", False):
+                return
+            if not _is_within_dm_window(prefs, self._config.timezone):
+                return
+            try:
+                await self._bot.send_message(
+                    chat_id=user.telegram_id,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                )
+            except TelegramForbiddenError:
+                prefs["dm_enabled"] = False
+                user.notify_pref = prefs
+                await session.commit()
+                logger.info("Disabled DM notifications for telegram_id=%s", user.telegram_id)
+
+    async def _build_rule_message(
+        self,
+        instance: models.NotificationInstance,
+        rule: models.NotificationRule,
+    ) -> str | None:
+        delay_minutes = max(0, rule.delay_seconds // 60)
+        delay_text = format_duration_ru(delay_minutes) if delay_minutes else None
+        description = html.escape(rule.custom_text or "")
+        if rule.event_type == "war":
+            war_data = await self._coc.get_current_war(self._config.clan_tag)
+            current_event_id = war_data.get("tag") or war_data.get("clan", {}).get("tag")
+            if instance.event_id and current_event_id != instance.event_id:
+                return None
+            opponent = html.escape(war_data.get("opponent", {}).get("name") or "противник")
+            header = "⏰ Напоминание о войне"
+            if delay_text:
+                header = f"⏰ Прошло {delay_text} с начала войны против {opponent}"
+            snapshot = _build_war_progress_snapshot(war_data, self._config.clan_tag)
+        elif rule.event_type == "cwl":
+            if not instance.event_id:
+                return None
+            war_data = await self._coc.get_cwl_war(instance.event_id)
+            opponent = html.escape(war_data.get("opponent", {}).get("name") or "противник")
+            header = "⏰ Напоминание ЛВК"
+            if delay_text:
+                header = f"⏰ Прошло {delay_text} с начала раунда ЛВК против {opponent}"
+            snapshot = _build_war_progress_snapshot(war_data, self._config.clan_tag)
+        else:
+            raids = await self._coc.get_capital_raid_seasons(self._config.clan_tag)
+            items = raids.get("items", [])
+            if not items:
+                return None
+            latest = items[0]
+            raid_id = latest.get("startTime") or latest.get("endTime") or "raid"
+            if instance.event_id and raid_id != instance.event_id:
+                return None
+            header = "⏰ Напоминание по столице"
+            if delay_text:
+                header = f"⏰ Прошло {delay_text} с начала рейдов столицы"
+            snapshot = _build_capital_snapshot(latest)
+        parts = [f"<b>{header}</b>"]
+        if description:
+            parts.append(description)
+        parts.append("")
+        parts.append(snapshot)
+        return "\n".join(parts)
+
+    async def _collect_cwl_attack_summary(self) -> str | None:
+        try:
+            league = await self._coc.get_league_group(self._config.clan_tag)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to load CWL league group for summary: %s", exc)
+            return None
+        totals: dict[str, dict[str, int]] = {}
+        for round_item in league.get("rounds", []):
+            for tag in round_item.get("warTags", []):
+                if tag and tag != "#0":
+                    try:
+                        war_data = await self._coc.get_cwl_war(tag)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    clan, _ = _resolve_war_sides(war_data, self._config.clan_tag)
+                    members = clan.get("members", [])
+                    attacks_per_member = war_data.get("attacksPerMember", 2) or 2
+                    for member in members:
+                        name = member.get("name", "Игрок")
+                        attacks = member.get("attacks", [])
+                        used = len(attacks) if isinstance(attacks, list) else int(attacks or 0)
+                        total_entry = totals.setdefault(name, {"used": 0, "available": 0})
+                        total_entry["used"] += used
+                        total_entry["available"] += attacks_per_member
+        if not totals:
+            return None
+        rows = []
+        for name, data in sorted(
+            totals.items(),
+            key=lambda item: (item[1]["available"] - item[1]["used"], item[0]),
+            reverse=True,
+        ):
+            missed = data["available"] - data["used"]
+            rows.append(
+                {
+                    "name": name,
+                    "used": data["used"],
+                    "available": data["available"],
+                    "missed": missed,
+                }
+            )
+        return build_total_attacks_table(rows)
+
     def _format_cwl_start(self, war: dict[str, Any]) -> str:
         opponent = html.escape(war.get("opponent", {}).get("name") or "противник")
         return f"<b>🏰 ЛВК: старт раунда против {opponent}!</b>"
 
     def _format_cwl_end(self, war: dict[str, Any]) -> str:
-        clan = war.get("clan", {})
-        enemy = war.get("opponent", {})
+        clan, enemy = _resolve_war_sides(war, self._config.clan_tag)
         opponent = html.escape(enemy.get("name") or "противник")
         result = _format_war_result(clan, enemy)
         score = f"{clan.get('stars', 0)}:{enemy.get('stars', 0)}"
-        return f"<b>🏁 ЛВК против {opponent} завершён ({result}).</b>\nСчёт: {score}"
+        text = f"<b>🏁 ЛВК против {opponent} завершён ({result}).</b>\nСчёт: {score}"
+        missing_table = _build_missing_attacks_section(
+            war,
+            self._config.clan_tag,
+            title="Кто не атаковал",
+        )
+        if missing_table:
+            text += f"\n\n{missing_table}"
+        return text
 
     def _format_capital_start(self, raid: dict[str, Any]) -> str:
         return "<b>🏗 Начались рейды клановой столицы!</b>"
@@ -651,6 +896,56 @@ def _format_war_result(clan: dict[str, Any], enemy: dict[str, Any]) -> str:
     return "ничья"
 
 
+def _resolve_war_sides(war_data: dict[str, Any], clan_tag: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    clan = war_data.get("clan", {})
+    opponent = war_data.get("opponent", {})
+    if clan_tag:
+        normalized = clan_tag.upper()
+        if opponent.get("tag", "").upper() == normalized and clan.get("tag", "").upper() != normalized:
+            return opponent, clan
+    return clan, opponent
+
+
+def _build_missing_attacks_section(
+    war_data: dict[str, Any],
+    clan_tag: str,
+    title: str,
+) -> str | None:
+    clan, _ = _resolve_war_sides(war_data, clan_tag)
+    missed = collect_missed_attacks({**war_data, "clan": clan})
+    if not missed:
+        return None
+    table = build_missed_attacks_table(missed)
+    return f"{title}:\n{table}"
+
+
+def _build_war_progress_snapshot(war_data: dict[str, Any], clan_tag: str) -> str:
+    clan, opponent = _resolve_war_sides(war_data, clan_tag)
+    clan_stars = clan.get("stars", 0)
+    enemy_stars = opponent.get("stars", 0)
+    clan_destr = clan.get("destructionPercentage", 0)
+    enemy_destr = opponent.get("destructionPercentage", 0)
+    attacks_per_member = war_data.get("attacksPerMember", 2) or 2
+    members = clan.get("members", [])
+    attacks_used = clan.get("attacks")
+    if attacks_used is None:
+        attacks_used = sum(len(member.get("attacks", [])) for member in members)
+    total_attacks = attacks_per_member * len(members)
+    missed = collect_missed_attacks({**war_data, "clan": clan})
+    lines = [
+        "<b>Состояние сейчас</b>",
+        f"⭐ Наши/их звёзды: {clan_stars} / {enemy_stars}",
+        f"💥 Разрушение: {clan_destr}% / {enemy_destr}%",
+        f"⚔️ Атаки: {attacks_used}/{total_attacks}",
+    ]
+    if missed:
+        lines.append("Кто не атаковал:")
+        lines.append(build_missed_attacks_table(missed))
+    else:
+        lines.append("Все атаки сделаны.")
+    return "\n".join(lines)
+
+
 def _format_top_list(title: str, items: list[tuple[str, int]]) -> str:
     if not items:
         return f"{title}: нет данных."
@@ -662,8 +957,7 @@ def _format_top_list(title: str, items: list[tuple[str, int]]) -> str:
 
 
 def _build_war_snapshot(war_data: dict[str, Any]) -> str:
-    clan = war_data.get("clan", {})
-    opponent = war_data.get("opponent", {})
+    clan, opponent = _resolve_war_sides(war_data, war_data.get("clan", {}).get("tag") or "")
     clan_stars = clan.get("stars", 0)
     enemy_stars = opponent.get("stars", 0)
     clan_destr = clan.get("destructionPercentage", 0)

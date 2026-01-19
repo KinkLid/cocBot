@@ -52,6 +52,8 @@ async def ensure_registered_and_in_clan(
         user.last_clan_check_at = now
         if clan_tag:
             user.clan_tag = clan_tag
+        if in_clan and user.first_seen_in_clan_at is None:
+            user.first_seen_in_clan_at = now
         await session.commit()
         return user, in_clan
 
