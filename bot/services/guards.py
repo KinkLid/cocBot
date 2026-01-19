@@ -13,7 +13,7 @@ from bot.db import models
 from bot.keyboards.common import main_menu_reply
 from bot.services.coc_client import CocClient
 from bot.services.permissions import is_admin
-from bot.ui.labels import label
+from bot.ui.labels import label, label_variants
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +78,12 @@ async def _is_exempt(event: Message | CallbackQuery, state_value: str | None) ->
         text = (event.text or "").strip()
         if text.startswith(("/start", "/help", "/register")):
             return True
-        if text in {"Регистрация", "Помощь / Гайд", "📜 Правила клана", "Главное меню"}:
+        if text in (
+            label_variants("register")
+            | label_variants("guide")
+            | label_variants("rules")
+            | label_variants("main_menu")
+        ):
             return True
         return False
     data = event.data or ""
@@ -92,7 +97,12 @@ async def _is_blacklist_exempt(event: Message | CallbackQuery, state_value: str 
         text = (event.text or "").strip()
         if text.startswith(("/help", "/rules", "/complaint")):
             return True
-        if text in {"📣 Жалоба", "Помощь / Гайд", "📜 Правила клана", "Главное меню"}:
+        if text in (
+            label_variants("complaint")
+            | label_variants("guide")
+            | label_variants("rules")
+            | label_variants("main_menu")
+        ):
             return True
         return False
     data = event.data or ""
