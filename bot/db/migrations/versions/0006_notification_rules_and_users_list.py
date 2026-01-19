@@ -11,6 +11,7 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import inspect
 from sqlalchemy.dialects import postgresql
 
 revision: str = "0006_notification_rules_and_users_list"
@@ -20,34 +21,43 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column("users", sa.Column("first_seen_in_clan_at", sa.DateTime(timezone=True), nullable=True))
-    op.create_table(
-        "notification_rules",
-        sa.Column("id", sa.Integer(), nullable=False),
-        sa.Column("scope", sa.String(length=16), nullable=False),
-        sa.Column("chat_id", sa.BigInteger(), nullable=True),
-        sa.Column("user_id", sa.BigInteger(), nullable=True),
-        sa.Column("event_type", sa.String(length=16), nullable=False),
-        sa.Column("delay_seconds", sa.Integer(), nullable=False),
-        sa.Column("custom_text", sa.Text(), nullable=True),
-        sa.Column("is_enabled", sa.Boolean(), nullable=False, server_default=sa.text("true")),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["user_id"], ["users.telegram_id"], ondelete="CASCADE"),
-        sa.PrimaryKeyConstraint("id"),
-    )
-    op.create_table(
-        "notification_instances",
-        sa.Column("id", sa.Integer(), nullable=False),
-        sa.Column("rule_id", sa.Integer(), nullable=False),
-        sa.Column("event_id", sa.String(length=64), nullable=False),
-        sa.Column("fire_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("status", sa.String(length=16), nullable=False),
-        sa.Column("payload", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["rule_id"], ["notification_rules.id"], ondelete="CASCADE"),
-        sa.PrimaryKeyConstraint("id"),
-    )
+    bind = op.get_bind()
+    inspector = inspect(bind)
+
+    columns = {column["name"] for column in inspector.get_columns("users")}
+    if "first_seen_in_clan_at" not in columns:
+        op.add_column("users", sa.Column("first_seen_in_clan_at", sa.DateTime(timezone=True), nullable=True))
+
+    if "notification_rules" not in inspector.get_table_names():
+        op.create_table(
+            "notification_rules",
+            sa.Column("id", sa.Integer(), nullable=False),
+            sa.Column("scope", sa.String(length=16), nullable=False),
+            sa.Column("chat_id", sa.BigInteger(), nullable=True),
+            sa.Column("user_id", sa.BigInteger(), nullable=True),
+            sa.Column("event_type", sa.String(length=16), nullable=False),
+            sa.Column("delay_seconds", sa.Integer(), nullable=False),
+            sa.Column("custom_text", sa.Text(), nullable=True),
+            sa.Column("is_enabled", sa.Boolean(), nullable=False, server_default=sa.text("true")),
+            sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+            sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+            sa.ForeignKeyConstraint(["user_id"], ["users.telegram_id"], ondelete="CASCADE"),
+            sa.PrimaryKeyConstraint("id"),
+        )
+
+    if "notification_instances" not in inspector.get_table_names():
+        op.create_table(
+            "notification_instances",
+            sa.Column("id", sa.Integer(), nullable=False),
+            sa.Column("rule_id", sa.Integer(), nullable=False),
+            sa.Column("event_id", sa.String(length=64), nullable=False),
+            sa.Column("fire_at", sa.DateTime(timezone=True), nullable=False),
+            sa.Column("status", sa.String(length=16), nullable=False),
+            sa.Column("payload", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+            sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+            sa.ForeignKeyConstraint(["rule_id"], ["notification_rules.id"], ondelete="CASCADE"),
+            sa.PrimaryKeyConstraint("id"),
+        )
 
 
 def downgrade() -> None:

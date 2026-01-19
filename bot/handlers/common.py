@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bot.config import BotConfig
 from bot.db import models
+from bot.handlers.complaints import start_complaint_flow
 from bot.handlers.notify import notify_command
 from bot.handlers.registration import start_registration
 from bot.handlers.stats import mystats_command
@@ -22,6 +23,7 @@ from bot.keyboards.common import admin_menu_reply, main_menu_reply, profile_menu
 from bot.services.coc_client import CocClient
 from bot.services.permissions import is_admin
 from bot.texts.help import build_help_text
+from bot.texts.rules import build_rules_text
 from bot.utils.navigation import reset_menu, set_menu
 from bot.utils.war_state import get_missed_attacks_label
 from bot.utils.state import reset_state_if_any
@@ -204,6 +206,17 @@ async def help_button(
     )
 
 
+@router.message(F.text == "📜 Правила клана")
+async def rules_button(message: Message, state: FSMContext, config: BotConfig) -> None:
+    await reset_state_if_any(state)
+    await reset_menu(state)
+    await message.answer(
+        build_rules_text(),
+        parse_mode="HTML",
+        reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+    )
+
+
 @router.message(F.text == "Мой профиль")
 async def profile_button(
     message: Message,
@@ -267,6 +280,14 @@ async def menu_callbacks(
         await notify_command(callback.message, state, config, sessionmaker)
     elif callback.data == "menu:targets":
         await targets_command(callback.message, state, config, coc_client, sessionmaker)
+    elif callback.data == "menu:rules":
+        await callback.message.answer(
+            build_rules_text(),
+            parse_mode="HTML",
+            reply_markup=main_menu_reply(is_admin(callback.from_user.id, config)),
+        )
+    elif callback.data == "menu:complaint":
+        await start_complaint_flow(callback.message, state, config, coc_client)
     elif callback.data == "menu:guide":
         await callback.message.answer(
             build_help_text(bot_username),
