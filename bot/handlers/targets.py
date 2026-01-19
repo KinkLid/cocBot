@@ -749,7 +749,7 @@ async def target_admin_unclaim(
     await callback.message.answer(f"Назначение для цели #{position} снято.")
 
 
-@router.message(F.text == "Назначить другому")
+@router.message(F.text == "🛠 Назначить другому")
 async def targets_assign_other(
     message: Message,
     state: FSMContext,
