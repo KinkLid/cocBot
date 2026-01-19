@@ -282,10 +282,13 @@ async def _show_selection(
     admin_mode: bool,
 ) -> None:
     markup = await _build_selection_markup(war, war_row, sessionmaker, user_id, admin_mode)
-    await message.answer(
-        "Выберите противника:",
-        reply_markup=markup,
-    )
+    try:
+        await message.answer(
+            "Выберите противника:",
+            reply_markup=markup,
+        )
+    except TelegramAPIError as exc:
+        logger.exception("Failed to send targets selection (chat_id=%s): %s", message.chat.id, exc)
 
 
 async def _refresh_selection(
@@ -297,10 +300,33 @@ async def _refresh_selection(
     admin_mode: bool,
 ) -> None:
     markup = await _build_selection_markup(war, war_row, sessionmaker, user_id, admin_mode)
+    if callback.message is None:
+        logger.warning(
+            "Failed to refresh selection: missing message (user_id=%s war_id=%s)",
+            user_id,
+            war_row.id,
+        )
+        return
     try:
         await callback.message.edit_reply_markup(reply_markup=markup)
-    except TelegramBadRequest as exc:
-        logger.warning("Failed to update selection markup: %s", exc)
+        return
+    except (TelegramBadRequest, TelegramForbiddenError) as exc:
+        logger.warning(
+            "Failed to update selection markup (chat_id=%s message_id=%s): %s",
+            callback.message.chat.id,
+            callback.message.message_id,
+            exc,
+        )
+    try:
+        await callback.message.answer("Выберите противника:", reply_markup=markup)
+        await _safe_delete_message(callback.message)
+    except TelegramAPIError as exc:
+        logger.exception(
+            "Failed to refresh selection with fallback (chat_id=%s message_id=%s): %s",
+            callback.message.chat.id,
+            callback.message.message_id,
+            exc,
+        )
 
 
 @router.message(Command("targets"))
@@ -441,6 +467,12 @@ async def target_claim(
 ) -> None:
     await callback.answer("Проверяю…")
     await reset_state_if_any(state)
+    logger.info(
+        "Target claim callback received (user_id=%s chat_id=%s data=%s)",
+        callback.from_user.id,
+        callback.message.chat.id if callback.message else None,
+        callback.data,
+    )
     position = int(callback.data.split(":")[2])
     user_id = callback.from_user.id
     war = await _load_war(coc_client, config.clan_tag)
@@ -467,6 +499,7 @@ async def target_claim(
             "Ты не участвуешь в этой войне, поэтому не можешь выбирать цели."
         )
         return
+    logger.info("Target claim resolved war (user_id=%s war_id=%s position=%s)", user_id, war_row.id, position)
 
     result_action = None
     try:
@@ -615,6 +648,12 @@ async def target_toggle(
 ) -> None:
     await callback.answer("Обновляю…")
     await reset_state_if_any(state)
+    logger.info(
+        "Target toggle callback received (user_id=%s chat_id=%s data=%s)",
+        callback.from_user.id,
+        callback.message.chat.id if callback.message else None,
+        callback.data,
+    )
     position = int(callback.data.split(":")[2])
     user_id = callback.from_user.id
     war = await _load_war(coc_client, config.clan_tag)
@@ -641,6 +680,7 @@ async def target_toggle(
             "Ты не участвуешь в этой войне, поэтому не можешь выбирать цели."
         )
         return
+    logger.info("Target toggle resolved war (user_id=%s war_id=%s position=%s)", user_id, war_row.id, position)
     try:
         async with sessionmaker() as session:
             claim = (
@@ -702,6 +742,12 @@ async def target_admin_unclaim(
 ) -> None:
     await callback.answer("Снимаю…")
     await reset_state_if_any(state)
+    logger.info(
+        "Target admin-unclaim callback received (user_id=%s chat_id=%s data=%s)",
+        callback.from_user.id,
+        callback.message.chat.id if callback.message else None,
+        callback.data,
+    )
     if not is_admin(callback.from_user.id, config):
         await callback.message.answer("Доступно только администраторам.")
         return
@@ -711,6 +757,12 @@ async def target_admin_unclaim(
         await callback.message.answer("Не удалось получить войну.")
         return
     war_row = await _ensure_war_row(sessionmaker, war)
+    logger.info(
+        "Target admin-unclaim resolved war (user_id=%s war_id=%s position=%s)",
+        callback.from_user.id,
+        war_row.id,
+        position,
+    )
     try:
         async with sessionmaker() as session:
             claim = (
