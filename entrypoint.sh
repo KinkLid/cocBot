@@ -9,7 +9,7 @@ delay_seconds=2
 rm -f /app/bot/db/migrations/versions/0006_notification_rules_and_users_list.py
 
 while [ "$attempt" -le "$max_attempts" ]; do
-  if alembic upgrade head; then
+  if alembic upgrade heads; then
     break
   fi
 
