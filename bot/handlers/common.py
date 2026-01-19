@@ -21,6 +21,7 @@ from bot.services.coc_client import CocClient
 from bot.services.permissions import is_admin
 from bot.texts.help import build_help_text
 from bot.utils.navigation import reset_menu, set_menu
+from bot.utils.war_state import get_missed_attacks_label
 from bot.utils.state import reset_state_if_any
 
 router = Router()
@@ -234,4 +235,5 @@ async def menu_callbacks(
             )
             return
         await set_menu(state, "admin_menu")
-        await callback.message.answer("Админ-панель.", reply_markup=admin_menu_reply())
+        missed_label = await get_missed_attacks_label(coc_client, config.clan_tag)
+        await callback.message.answer("Админ-панель.", reply_markup=admin_menu_reply(missed_label))
