@@ -151,19 +151,14 @@ async def mystats_command(
 
 
 @router.message(Command("stats"))
-async def stats_command(message: Message, state: FSMContext, config: BotConfig) -> None:
-    await reset_state_if_any(state)
-    await reset_menu(state)
-    if not is_admin(message.from_user.id, config):
-        await message.answer(
-            "Недостаточно прав.",
-            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
-        )
-        return
-    await message.answer(
-        "Админская статистика доступна через админ-панель.",
-        reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
-    )
+async def stats_command(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+    coc_client: CocClient,
+) -> None:
+    await mystats_command(message, state, config, sessionmaker, coc_client)
 
 
 @router.message(Command("season"))

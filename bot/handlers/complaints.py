@@ -5,6 +5,7 @@ import logging
 from aiogram import F, Router
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
@@ -79,6 +80,16 @@ async def start_complaint_flow(
 
 @router.message(F.text == "📣 Жалоба")
 async def complaint_button(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    coc_client: CocClient,
+) -> None:
+    await start_complaint_flow(message, state, config, coc_client)
+
+
+@router.message(Command("complaint"))
+async def complaint_command(
     message: Message,
     state: FSMContext,
     config: BotConfig,
@@ -288,6 +299,16 @@ async def admin_complaints_list(
             parse_mode=ParseMode.HTML,
             reply_markup=complaint_admin_kb(complaint.id),
         )
+
+
+@router.message(Command("complaints"))
+async def admin_complaints_command(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+) -> None:
+    await admin_complaints_list(message, state, config, sessionmaker)
 
 
 @router.callback_query(F.data.startswith("complaint:delete:"))

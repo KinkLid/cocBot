@@ -190,6 +190,21 @@ async def help_command(
     )
 
 
+@router.message(Command("rules"))
+async def rules_command(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+) -> None:
+    await reset_state_if_any(state)
+    await reset_menu(state)
+    await message.answer(
+        build_rules_text(),
+        parse_mode="HTML",
+        reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+    )
+
+
 @router.message(F.text == "Помощь / Гайд")
 async def help_button(
     message: Message,
@@ -208,13 +223,17 @@ async def help_button(
 
 @router.message(F.text == "📜 Правила клана")
 async def rules_button(message: Message, state: FSMContext, config: BotConfig) -> None:
-    await reset_state_if_any(state)
-    await reset_menu(state)
-    await message.answer(
-        build_rules_text(),
-        parse_mode="HTML",
-        reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
-    )
+    await rules_command(message, state, config)
+
+
+@router.message(Command("profile"))
+async def profile_command(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+) -> None:
+    await me_command(message, state, config, sessionmaker)
 
 
 @router.message(F.text == "Мой профиль")
