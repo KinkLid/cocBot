@@ -22,6 +22,7 @@ from bot.texts.hints import REGISTER_HINT
 from bot.utils.navigation import reset_menu
 from bot.utils.state import reset_state_if_any
 from bot.utils.validators import is_valid_tag, normalize_tag
+from bot.utils.telegram import build_bot_dm_keyboard, build_bot_dm_link, try_send_dm
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -35,8 +36,26 @@ class RegisterState(StatesGroup):
 async def _ensure_private(message: Message, bot_username: str) -> bool:
     if message.chat.type == ChatType.PRIVATE:
         return True
-    link = f"https://t.me/{bot_username}?start=register"
-    await message.answer(f"Перейдите в ЛС: {link}")
+    link = build_bot_dm_link(bot_username, start_param="register")
+    sent = await try_send_dm(
+        message.bot,
+        message.from_user.id,
+        (
+            "Регистрация доступна только в ЛС. "
+            "Нажмите кнопку ниже, чтобы начать."
+        ),
+        reply_markup=build_bot_dm_keyboard(bot_username, label="Начать регистрацию", start_param="register"),
+    )
+    if sent:
+        await message.answer(
+            "Я отправил вам инструкцию в ЛС. Перейдите туда для регистрации.",
+            reply_markup=build_bot_dm_keyboard(bot_username, label="Открыть бота", start_param="register"),
+        )
+        return False
+    await message.answer(
+        f"Регистрация доступна только в ЛС. Перейдите: {link}",
+        reply_markup=build_bot_dm_keyboard(bot_username, label="Открыть бота", start_param="register"),
+    )
     return False
 
 

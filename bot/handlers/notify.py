@@ -156,6 +156,33 @@ async def notify_command(
     )
 
 
+async def send_notify_menu(
+    bot,
+    chat_id: int,
+    user_id: int,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+) -> None:
+    async with sessionmaker() as session:
+        user = (
+            await session.execute(select(models.User).where(models.User.telegram_id == user_id))
+        ).scalar_one_or_none()
+        if not user:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="Вы ещё не зарегистрированы. Нажмите «Регистрация».",
+                reply_markup=main_menu_reply(is_admin(user_id, config)),
+            )
+            return
+        prefs = _normalize_notify_pref(user.notify_pref)
+        dm_enabled = bool(prefs.get("dm_enabled", False))
+    await bot.send_message(
+        chat_id=chat_id,
+        text="Раздел уведомлений.",
+        reply_markup=notify_menu_reply(dm_enabled, prefs["dm_window"], prefs["dm_categories"]),
+    )
+
+
 @router.message(F.text == "🔔 Уведомления")
 async def notify_button(
     message: Message,
