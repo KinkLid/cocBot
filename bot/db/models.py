@@ -30,6 +30,7 @@ class User(Base):
     clan_tag: Mapped[str] = mapped_column(String(16))
     last_clan_check_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     is_in_clan_cached: Mapped[Optional[bool]] = mapped_column(Boolean)
+    first_seen_in_clan_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     role_flags: Mapped[int] = mapped_column(Integer, default=0)
     notify_pref: Mapped[dict] = mapped_column(JSONB, default=dict)
     last_stats_message_id: Mapped[Optional[int]] = mapped_column(Integer)
@@ -226,4 +227,33 @@ class ScheduledNotification(Base):
     created_by: Mapped[Optional[int]] = mapped_column(BigInteger)
     status: Mapped[str] = mapped_column(String(16), default="pending")
     context: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class NotificationRule(Base):
+    __tablename__ = "notification_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scope: Mapped[str] = mapped_column(String(16))
+    chat_id: Mapped[Optional[int]] = mapped_column(BigInteger)
+    user_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("users.telegram_id"))
+    event_type: Mapped[str] = mapped_column(String(16))
+    delay_seconds: Mapped[int] = mapped_column(Integer)
+    custom_text: Mapped[Optional[str]] = mapped_column(Text)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class NotificationInstance(Base):
+    __tablename__ = "notification_instances"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    rule_id: Mapped[int] = mapped_column(Integer, ForeignKey("notification_rules.id"))
+    event_id: Mapped[str] = mapped_column(String(64))
+    fire_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    payload: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)

@@ -8,7 +8,7 @@ def main_menu_inline(is_admin: bool) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="Регистрация", callback_data="menu:register")],
         [InlineKeyboardButton(text="Мой профиль", callback_data="menu:me")],
         [InlineKeyboardButton(text="Моя статистика", callback_data="menu:mystats")],
-        [InlineKeyboardButton(text="Настройки уведомлений", callback_data="menu:notify")],
+        [InlineKeyboardButton(text="🔔 Уведомления", callback_data="menu:notify")],
         [InlineKeyboardButton(text="Цели на войне", callback_data="menu:targets")],
         [InlineKeyboardButton(text="Помощь / Гайд", callback_data="menu:guide")],
     ]
@@ -20,7 +20,7 @@ def main_menu_inline(is_admin: bool) -> InlineKeyboardMarkup:
 def main_menu_reply(is_admin: bool) -> ReplyKeyboardMarkup:
     keyboard = [
         [KeyboardButton(text="Регистрация"), KeyboardButton(text="Мой профиль")],
-        [KeyboardButton(text="Моя статистика"), KeyboardButton(text="Настройки уведомлений")],
+        [KeyboardButton(text="Моя статистика"), KeyboardButton(text="🔔 Уведомления")],
         [KeyboardButton(text="Цели на войне"), KeyboardButton(text="Помощь / Гайд")],
     ]
     if is_admin:
@@ -78,11 +78,7 @@ def notify_menu_reply(dm_enabled: bool, dm_window: str, categories: dict[str, bo
             [KeyboardButton(text=war_label), KeyboardButton(text=cwl_label)],
             [KeyboardButton(text=capital_label)],
             [KeyboardButton(text=window_label)],
-            [
-                KeyboardButton(text="➕ Напоминание КВ"),
-                KeyboardButton(text="➕ Напоминание ЛВК"),
-            ],
-            [KeyboardButton(text="➕ Напоминание рейдов")],
+            [KeyboardButton(text="🔔 Личные уведомления")],
             [KeyboardButton(text="Главное меню")],
         ],
         resize_keyboard=True,
@@ -103,18 +99,44 @@ def targets_admin_reply() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="Выбрать противника"), KeyboardButton(text="Таблица целей")],
-            [KeyboardButton(text="Назначить другому")],
+            [KeyboardButton(text="🛠 Назначить другому")],
             [KeyboardButton(text="Главное меню")],
         ],
         resize_keyboard=True,
     )
 
 
-def admin_menu_reply() -> ReplyKeyboardMarkup:
+def admin_menu_reply(missed_label: str | None = None) -> ReplyKeyboardMarkup:
+    keyboard = [
+        [KeyboardButton(text="Очистить игрока"), KeyboardButton(text="Диагностика")],
+        [KeyboardButton(text="👥 Пользователи")],
+    ]
+    if missed_label:
+        keyboard.append([KeyboardButton(text=missed_label)])
+    keyboard.append([KeyboardButton(text="🔔 Уведомления (чат)")])
+    keyboard.append([KeyboardButton(text="Уведомления")])
+    keyboard.append([KeyboardButton(text="Назад")])
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
+
+def notify_rules_type_reply() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="Очистить игрока"), KeyboardButton(text="Диагностика")],
-            [KeyboardButton(text="Уведомления")],
+            [KeyboardButton(text="КВ"), KeyboardButton(text="ЛВК")],
+            [KeyboardButton(text="Рейды")],
+            [KeyboardButton(text="Назад")],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def notify_rules_action_reply() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="➕ Добавить уведомление")],
+            [KeyboardButton(text="📋 Активные уведомления")],
+            [KeyboardButton(text="✏️ Изменить уведомление")],
+            [KeyboardButton(text="🗑 Удалить / Отключить уведомление")],
             [KeyboardButton(text="Назад")],
         ],
         resize_keyboard=True,
@@ -151,7 +173,6 @@ def admin_notify_category_reply(category: str, settings: dict[str, bool]) -> Rep
                     text="КВ: напоминания → чат ✅" if settings.get("reminder", True) else "КВ: напоминания → чат ⛔"
                 ),
             ],
-            [KeyboardButton(text="Создать напоминание КВ")],
         ]
     elif category == "cwl":
         buttons = [
@@ -179,7 +200,6 @@ def admin_notify_category_reply(category: str, settings: dict[str, bool]) -> Rep
                     else "Итоги месяца → чат ⛔"
                 ),
             ],
-            [KeyboardButton(text="Создать напоминание ЛВК")],
         ]
     elif category == "capital":
         buttons = [
@@ -202,7 +222,6 @@ def admin_notify_category_reply(category: str, settings: dict[str, bool]) -> Rep
                     else "Столица: напоминания → чат ⛔"
                 )
             ],
-            [KeyboardButton(text="Создать напоминание столицы")],
         ]
     buttons.append([KeyboardButton(text="Назад")])
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
