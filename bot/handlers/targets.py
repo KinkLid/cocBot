@@ -364,6 +364,12 @@ async def targets_select_button(
     coc_client: CocClient,
     sessionmaker: async_sessionmaker,
 ) -> None:
+    logger.info(
+        "Targets select button received (user_id=%s chat_id=%s text=%s)",
+        message.from_user.id,
+        message.chat.id,
+        message.text,
+    )
     await reset_state_if_any(state)
     war = await _load_war(coc_client, config.clan_tag)
     if not war:
@@ -429,6 +435,12 @@ async def targets_table_button(
     coc_client: CocClient,
     sessionmaker: async_sessionmaker,
 ) -> None:
+    logger.info(
+        "Targets table button received (user_id=%s chat_id=%s text=%s)",
+        message.from_user.id,
+        message.chat.id,
+        message.text,
+    )
     await reset_state_if_any(state)
     war = await _load_war(coc_client, config.clan_tag)
     if not war:
@@ -821,6 +833,12 @@ async def targets_assign_other(
     coc_client: CocClient,
     sessionmaker: async_sessionmaker,
 ) -> None:
+    logger.info(
+        "Targets assign button received (user_id=%s chat_id=%s text=%s)",
+        message.from_user.id,
+        message.chat.id,
+        message.text,
+    )
     await reset_state_if_any(state)
     if not is_admin(message.from_user.id, config):
         await message.answer("Доступно только администраторам.")
