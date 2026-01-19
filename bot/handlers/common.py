@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timezone
 
 from aiogram import F, Router
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.enums import ChatMemberStatus, ChatType, ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
@@ -439,13 +440,14 @@ async def track_main_chat_member(
     sessionmaker: async_sessionmaker,
 ) -> None:
     if message.chat.id != config.main_chat_id:
-        return
+        raise SkipHandler
     async with sessionmaker() as session:
         user = (
             await session.execute(select(models.User).where(models.User.telegram_id == message.from_user.id))
         ).scalar_one_or_none()
         if not user:
-            return
+            raise SkipHandler
         user.last_seen_in_main_chat = datetime.now(timezone.utc)
         user.main_chat_member_check_ok = True
         await session.commit()
+    raise SkipHandler
