@@ -3,7 +3,8 @@ from __future__ import annotations
 import html
 
 from aiogram import F, Router
-from aiogram.enums import ParseMode
+from aiogram.enums import ChatType, ParseMode
+from aiogram.exceptions import TelegramForbiddenError
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -21,6 +22,7 @@ from bot.texts.hints import STATS_HINT
 from bot.texts.stats import STAT_LABELS
 from bot.utils.navigation import reset_menu
 from bot.utils.state import reset_state_if_any
+from bot.utils.telegram import build_bot_dm_keyboard, build_bot_dm_link
 
 router = Router()
 
@@ -112,6 +114,7 @@ async def mystats_command(
     config: BotConfig,
     sessionmaker: async_sessionmaker,
     coc_client: CocClient,
+    bot_username: str,
 ) -> None:
     await reset_state_if_any(state)
     await reset_menu(state)
@@ -136,11 +139,36 @@ async def mystats_command(
 
     war_summary = await _load_warlog_summary(coc_client, config.clan_tag, user.player_tag)
     capital_summary = await _load_capital_summary(coc_client, config.clan_tag, user.player_tag)
-    await _send_or_edit_stats(message, sessionmaker, user, _format_stats(player, war_summary, capital_summary))
-    await message.answer(
-        "Экран статистики.",
-        reply_markup=stats_menu_reply(),
+    stats_text = _format_stats(player, war_summary, capital_summary)
+    if message.chat.type != ChatType.PRIVATE:
+        try:
+            await _send_or_edit_stats(
+                message.bot,
+                message.from_user.id,
+                sessionmaker,
+                user,
+                stats_text,
+            )
+        except TelegramForbiddenError:
+            link = build_bot_dm_link(bot_username)
+            await message.answer(
+                f"Не могу написать вам в ЛС. Напишите боту напрямую: {link}",
+                reply_markup=build_bot_dm_keyboard(bot_username, label="Открыть бота"),
+            )
+            return
+        await message.answer(
+            "Статистика отправлена в ЛС.",
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        )
+        return
+    await _send_or_edit_stats(
+        message.bot,
+        message.chat.id,
+        sessionmaker,
+        user,
+        stats_text,
     )
+    await message.answer("Экран статистики.", reply_markup=stats_menu_reply())
     await send_hint_once(
         message,
         sessionmaker,
@@ -157,8 +185,9 @@ async def stats_command(
     config: BotConfig,
     sessionmaker: async_sessionmaker,
     coc_client: CocClient,
+    bot_username: str,
 ) -> None:
-    await mystats_command(message, state, config, sessionmaker, coc_client)
+    await mystats_command(message, state, config, sessionmaker, coc_client, bot_username)
 
 
 @router.message(Command("season"))
@@ -201,8 +230,9 @@ async def mystats_button(
     config: BotConfig,
     sessionmaker: async_sessionmaker,
     coc_client: CocClient,
+    bot_username: str,
 ) -> None:
-    await mystats_command(message, state, config, sessionmaker, coc_client)
+    await mystats_command(message, state, config, sessionmaker, coc_client, bot_username)
 
 
 @router.message(F.text == "Обновить статистику")
@@ -234,11 +264,18 @@ async def stats_refresh_button(
         return
     war_summary = await _load_warlog_summary(coc_client, config.clan_tag, user.player_tag)
     capital_summary = await _load_capital_summary(coc_client, config.clan_tag, user.player_tag)
-    await _send_or_edit_stats(message, sessionmaker, user, _format_stats(player, war_summary, capital_summary))
+    await _send_or_edit_stats(
+        message.bot,
+        message.chat.id,
+        sessionmaker,
+        user,
+        _format_stats(player, war_summary, capital_summary),
+    )
 
 
 async def _send_or_edit_stats(
-    message: Message,
+    bot,
+    chat_id: int,
     sessionmaker: async_sessionmaker,
     user: models.User,
     text: str,
@@ -249,8 +286,8 @@ async def _send_or_edit_stats(
         ).scalar_one()
         if user.last_stats_message_id:
             try:
-                await message.bot.edit_message_text(
-                    chat_id=message.chat.id,
+                await bot.edit_message_text(
+                    chat_id=chat_id,
                     message_id=user.last_stats_message_id,
                     text=text,
                     parse_mode=ParseMode.HTML,
@@ -258,6 +295,6 @@ async def _send_or_edit_stats(
                 return
             except Exception:  # noqa: BLE001
                 pass
-        sent = await message.answer(text, parse_mode=ParseMode.HTML)
-        user.last_stats_message_id = sent.message_id
+        message = await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML)
+        user.last_stats_message_id = message.message_id
         await session.commit()

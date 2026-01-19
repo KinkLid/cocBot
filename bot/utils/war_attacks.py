@@ -24,11 +24,18 @@ def collect_missed_attacks(war_data: dict[str, Any]) -> list[dict[str, Any]]:
                 {
                     "name": member.get("name", "Игрок"),
                     "townhall": member.get("townhallLevel"),
+                    "map_position": member.get("mapPosition"),
                     "used": used,
                     "available": attacks_per_member,
                     "remaining": remaining,
                 }
             )
+    missed.sort(
+        key=lambda entry: (
+            -(entry.get("townhall") or 0),
+            entry.get("map_position") or 0,
+        )
+    )
     return missed
 
 

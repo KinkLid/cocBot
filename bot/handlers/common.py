@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timezone
 
 from aiogram import F, Router
-from aiogram.enums import ChatMemberStatus, ChatType
+from aiogram.enums import ChatMemberStatus, ChatType, ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from bot.config import BotConfig
 from bot.db import models
 from bot.handlers.complaints import start_complaint_flow
-from bot.handlers.notify import notify_command
+from bot.handlers.notify import notify_command, send_notify_menu
 from bot.handlers.registration import start_registration
 from bot.handlers.stats import mystats_command
 from bot.handlers.targets import targets_command
@@ -27,9 +27,27 @@ from bot.texts.rules import build_rules_text
 from bot.utils.navigation import reset_menu, set_menu
 from bot.utils.war_state import get_missed_attacks_label
 from bot.utils.state import reset_state_if_any
+from bot.utils.telegram import build_bot_dm_keyboard, build_bot_dm_link, try_send_dm
 
 router = Router()
 logger = logging.getLogger(__name__)
+
+MENU_TEXT_ACTIONS = {
+    "Регистрация": "register",
+    "Мой профиль": "profile",
+    "Моя статистика": "mystats",
+    "🔔 Уведомления": "notify",
+    "Уведомления": "notify",
+    "Цели на войне": "targets",
+    "📜 Правила клана": "rules",
+    "Правила клана": "rules",
+    "📣 Жалоба": "complaint",
+    "Жалоба": "complaint",
+    "Помощь / Гайд": "guide",
+    "Помощь гайд": "guide",
+    "Админ-панель": "admin",
+    "Админ панель": "admin",
+}
 
 
 @router.message(CommandStart())
@@ -221,6 +239,98 @@ async def help_button(
     )
 
 
+@router.message(
+    F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}),
+    F.text.in_(list(MENU_TEXT_ACTIONS.keys())),
+)
+async def group_menu_router(
+    message: Message,
+    state: FSMContext,
+    bot_username: str,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+    coc_client: CocClient,
+) -> None:
+    action = MENU_TEXT_ACTIONS.get(message.text or "")
+    if not action:
+        return
+    if action == "register":
+        await start_registration(message, state, bot_username, config, sessionmaker)
+        return
+    if action == "profile":
+        await me_command(message, state, config, sessionmaker)
+        return
+    if action == "mystats":
+        await mystats_command(message, state, config, sessionmaker, coc_client, bot_username)
+        return
+    if action == "notify":
+        try:
+            await send_notify_menu(
+                message.bot,
+                message.from_user.id,
+                message.from_user.id,
+                config,
+                sessionmaker,
+            )
+        except TelegramForbiddenError:
+            link = build_bot_dm_link(bot_username)
+            await message.answer(
+                f"Не могу написать вам в ЛС. Напишите боту напрямую: {link}",
+                reply_markup=build_bot_dm_keyboard(bot_username, label="Открыть бота"),
+            )
+            return
+        await message.answer(
+            "Открыл настройки уведомлений в ЛС.",
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        )
+        return
+    if action == "complaint":
+        sent = await try_send_dm(
+            message.bot,
+            message.from_user.id,
+            "Чтобы подать жалобу, откройте ЛС и нажмите «📣 Жалоба».",
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        )
+        if sent:
+            await message.answer(
+                "Я отправил инструкцию в ЛС. Перейдите туда для жалобы.",
+                reply_markup=build_bot_dm_keyboard(bot_username, label="Открыть бота"),
+            )
+            return
+        await message.answer(
+            f"Чтобы подать жалобу, откройте ЛС: {build_bot_dm_link(bot_username)}",
+            reply_markup=build_bot_dm_keyboard(bot_username, label="Открыть бота"),
+        )
+        return
+    if action == "targets":
+        await targets_command(message, state, config, coc_client, sessionmaker)
+        return
+    if action == "rules":
+        await message.answer(
+            build_rules_text(),
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        )
+        return
+    if action == "guide":
+        await message.answer(
+            build_help_text(bot_username),
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        )
+        return
+    if action == "admin":
+        if not is_admin(message.from_user.id, config):
+            await message.answer(
+                "Админ-панель доступна только администраторам.",
+                reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+            )
+            return
+        await set_menu(state, "admin_menu")
+        missed_label = await get_missed_attacks_label(coc_client, config.clan_tag)
+        await message.answer("Админ-панель.", reply_markup=admin_menu_reply(missed_label))
+
+
 @router.message(F.text == "📜 Правила клана")
 async def rules_button(message: Message, state: FSMContext, config: BotConfig) -> None:
     await rules_command(message, state, config)
@@ -294,7 +404,7 @@ async def menu_callbacks(
             reply_markup=profile_menu_reply(),
         )
     elif callback.data == "menu:mystats":
-        await mystats_command(callback.message, state, config, sessionmaker, coc_client)
+        await mystats_command(callback.message, state, config, sessionmaker, coc_client, bot_username)
     elif callback.data == "menu:notify":
         await notify_command(callback.message, state, config, sessionmaker)
     elif callback.data == "menu:targets":
