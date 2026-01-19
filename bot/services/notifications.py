@@ -16,9 +16,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from bot.config import BotConfig
 from bot.db import models
 from bot.services.coc_client import CocClient
+from bot.services.complaints import notify_admins_about_complaint
 from bot.utils.coc_time import parse_coc_time
 from bot.utils.notify_time import format_duration_ru
 from bot.utils.war_attacks import build_missed_attacks_table, build_total_attacks_table, collect_missed_attacks
+from bot.utils.validators import normalize_tag
 
 logger = logging.getLogger(__name__)
 
@@ -127,12 +129,17 @@ class NotificationService:
                 )
                 session.add(war_state)
                 await session.commit()
+                if state in {"inWar", "warEnded"}:
+                    await self._process_war_attack_warnings(war_data)
                 return
 
             previous_state = war_state.state
             war_state.state = state
             war_state.updated_at = datetime.now(timezone.utc)
             await session.commit()
+
+        if state in {"inWar", "warEnded"}:
+            await self._process_war_attack_warnings(war_data)
 
         if previous_state != state and state in {"preparation", "inWar", "warEnded"}:
             if state in {"preparation", "inWar"} and previous_state not in {"preparation", "inWar"}:
@@ -622,6 +629,31 @@ class NotificationService:
                 await session.commit()
                 logger.info("Disabled DM notifications for telegram_id=%s", user.telegram_id)
 
+    async def _send_warning_dm(self, player_tag: str, text: str) -> None:
+        normalized_tag = normalize_tag(player_tag)
+        async with self._sessionmaker() as session:
+            user = (
+                await session.execute(select(models.User).where(models.User.player_tag == normalized_tag))
+            ).scalar_one_or_none()
+            if not user:
+                return
+            prefs = normalize_user_pref(user.notify_pref)
+            if not prefs.get("dm_enabled", False):
+                return
+            if not _is_within_dm_window(prefs, self._config.timezone):
+                return
+            try:
+                await self._bot.send_message(
+                    chat_id=user.telegram_id,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                )
+            except TelegramForbiddenError:
+                prefs["dm_enabled"] = False
+                user.notify_pref = prefs
+                await session.commit()
+                logger.info("Disabled DM notifications for telegram_id=%s", user.telegram_id)
+
     async def _build_rule_message(
         self,
         instance: models.NotificationInstance,
@@ -668,6 +700,107 @@ class NotificationService:
         parts.append("")
         parts.append(snapshot)
         return "\n".join(parts)
+
+    async def _process_war_attack_warnings(self, war_data: dict[str, Any]) -> None:
+        clan, opponent = _resolve_war_sides(war_data, self._config.clan_tag)
+        clan_members = clan.get("members", [])
+        opponent_members = opponent.get("members", [])
+        if not clan_members or not opponent_members:
+            return
+        war_tag = war_data.get("tag") or war_data.get("clan", {}).get("tag") or self._config.clan_tag
+        defender_positions = {
+            normalize_tag(member.get("tag", "")): member.get("mapPosition")
+            for member in opponent_members
+            if member.get("tag")
+        }
+        violations: list[dict[str, Any]] = []
+        for member in clan_members:
+            attacker_tag_raw = member.get("tag")
+            attacker_position = member.get("mapPosition")
+            if not attacker_tag_raw or not attacker_position:
+                continue
+            attacks = member.get("attacks")
+            if not isinstance(attacks, list):
+                continue
+            attacker_tag = normalize_tag(attacker_tag_raw)
+            for attack in attacks:
+                defender_tag_raw = attack.get("defenderTag")
+                if not defender_tag_raw:
+                    continue
+                defender_tag = normalize_tag(defender_tag_raw)
+                defender_position = defender_positions.get(defender_tag)
+                if not defender_position:
+                    continue
+                if defender_position <= attacker_position + 10:
+                    continue
+                attack_order = attack.get("order")
+                if attack_order is None:
+                    attack_order = attack.get("attackOrder", 0)
+                violations.append(
+                    {
+                        "war_tag": war_tag,
+                        "attacker_tag": attacker_tag,
+                        "attacker_name": member.get("name", "Игрок"),
+                        "attacker_position": attacker_position,
+                        "defender_tag": defender_tag,
+                        "defender_position": defender_position,
+                        "attack_order": int(attack_order or 0),
+                    }
+                )
+        if not violations:
+            return
+
+        created: list[tuple[models.Complaint, dict[str, Any]]] = []
+        async with self._sessionmaker() as session:
+            for violation in violations:
+                exists = (
+                    await session.execute(
+                        select(models.WarAttackEvent.id)
+                        .where(models.WarAttackEvent.war_tag == violation["war_tag"])
+                        .where(models.WarAttackEvent.attacker_tag == violation["attacker_tag"])
+                        .where(models.WarAttackEvent.defender_tag == violation["defender_tag"])
+                        .where(models.WarAttackEvent.attack_order == violation["attack_order"])
+                    )
+                ).scalar_one_or_none()
+                if exists:
+                    continue
+                session.add(
+                    models.WarAttackEvent(
+                        war_tag=violation["war_tag"],
+                        attacker_tag=violation["attacker_tag"],
+                        defender_tag=violation["defender_tag"],
+                        attack_order=violation["attack_order"],
+                    )
+                )
+                complaint_text = (
+                    f"Атака на позицию #{violation['defender_position']} при своей позиции "
+                    f"#{violation['attacker_position']}. Разница больше 10."
+                )
+                complaint = models.Complaint(
+                    created_by_tg_id=None,
+                    created_by_tg_name="Авто-предупреждение",
+                    target_player_tag=violation["attacker_tag"],
+                    target_player_name=violation["attacker_name"],
+                    text=complaint_text,
+                    type="auto_warning",
+                    status="open",
+                )
+                session.add(complaint)
+                await session.flush()
+                created.append((complaint, violation))
+            if created:
+                await session.commit()
+
+        for complaint, violation in created:
+            await notify_admins_about_complaint(self._bot, self._config, complaint)
+            warning_text = (
+                "<b>⚠️ Предупреждение</b>\n"
+                f"Вы атаковали цель #{violation['defender_position']}, "
+                f"хотя ваша позиция #{violation['attacker_position']}.\n"
+                "По правилам можно не ниже чем на 10 позиций.\n"
+                "Если это ошибка — напишите админам через кнопку «Жалоба»."
+            )
+            await self._send_warning_dm(violation["attacker_tag"], warning_text)
 
     async def _collect_cwl_attack_summary(self) -> str | None:
         try:

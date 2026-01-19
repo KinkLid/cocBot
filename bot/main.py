@@ -8,7 +8,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from bot.config import load_config
 from bot.db import build_engine, build_sessionmaker
-from bot.handlers import admin, common, hints, notify, registration, stats, targets
+from bot.handlers import admin, common, complaints, hints, notify, registration, stats, targets
 from bot.jobs.scheduler import configure_scheduler
 from bot.services.coc_client import CocClient
 from bot.services.guards import ClanAccessMiddleware
@@ -50,6 +50,7 @@ async def main() -> None:
     dp.callback_query.middleware(guard_middleware)
 
     dp.include_router(common.router)
+    dp.include_router(complaints.router)
     dp.include_router(hints.router)
     dp.include_router(registration.router)
     dp.include_router(stats.router)
