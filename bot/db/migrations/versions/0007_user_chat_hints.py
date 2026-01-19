@@ -1,7 +1,7 @@
 """add main chat tracking and user hints
 
 Revision ID: 0007_user_chat_hints
-Revises: 0006_notification_rules, 0006_notification_rules_and_users_list
+Revises: 0006_notification_rules
 Create Date: 2024-06-01 00:00:00.000000
 
 """
@@ -13,10 +13,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision: str = "0007_user_chat_hints"
-down_revision: Union[str, Sequence[str], None] = (
-    "0006_notification_rules",
-    "0006_notification_rules_and_users_list",
-)
+down_revision: Union[str, Sequence[str], None] = "0006_notification_rules"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
