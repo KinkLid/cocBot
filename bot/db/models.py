@@ -31,9 +31,15 @@ class User(Base):
     last_clan_check_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     is_in_clan_cached: Mapped[Optional[bool]] = mapped_column(Boolean)
     first_seen_in_clan_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    last_seen_in_main_chat: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    main_chat_member_check_ok: Mapped[Optional[bool]] = mapped_column(Boolean)
     role_flags: Mapped[int] = mapped_column(Integer, default=0)
     notify_pref: Mapped[dict] = mapped_column(JSONB, default=dict)
     last_stats_message_id: Mapped[Optional[int]] = mapped_column(Integer)
+    seen_hint_targets: Mapped[Optional[bool]] = mapped_column(Boolean)
+    seen_hint_notify: Mapped[Optional[bool]] = mapped_column(Boolean)
+    seen_hint_stats: Mapped[Optional[bool]] = mapped_column(Boolean)
+    seen_hint_admin_notify: Mapped[Optional[bool]] = mapped_column(Boolean)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow

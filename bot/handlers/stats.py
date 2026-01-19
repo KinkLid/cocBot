@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import html
+
 from aiogram import F, Router
+from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -12,7 +15,10 @@ from bot.db import models
 from bot.keyboards.common import main_menu_reply, stats_menu_reply
 from bot.keyboards.seasons import seasons_kb
 from bot.services.coc_client import CocClient
+from bot.services.hints import send_hint_once
 from bot.services.permissions import is_admin
+from bot.texts.hints import STATS_HINT
+from bot.texts.stats import STAT_LABELS
 from bot.utils.navigation import reset_menu
 from bot.utils.state import reset_state_if_any
 
@@ -20,26 +26,27 @@ router = Router()
 
 
 def _format_stats(player: dict, war_summary: str | None, capital_summary: str | None) -> str:
-    name = player.get("name", "—")
-    tag = player.get("tag", "—")
-    th = player.get("townHallLevel", "—")
-    trophies = player.get("trophies", "—")
-    donations = player.get("donations", "—")
-    donations_received = player.get("donationsReceived", "—")
-    war_stars = player.get("warStars", "—")
-    attack_wins = player.get("attackWins", "—")
-    defense_wins = player.get("defenseWins", "—")
-    clan_name = player.get("clan", {}).get("name", "—")
+    name = html.escape(str(player.get("name", "—")))
+    tag = html.escape(str(player.get("tag", "—")))
+    th = html.escape(str(player.get("townHallLevel", "—")))
+    trophies = html.escape(str(player.get("trophies", "—")))
+    donations = html.escape(str(player.get("donations", "—")))
+    donations_received = html.escape(str(player.get("donationsReceived", "—")))
+    war_stars = html.escape(str(player.get("warStars", "—")))
+    attack_wins = html.escape(str(player.get("attackWins", "—")))
+    defense_wins = html.escape(str(player.get("defenseWins", "—")))
+    clan_name = html.escape(str(player.get("clan", {}).get("name", "—")))
 
     lines = [
-        f"*Профиль*: {name} ({tag})",
-        f"*Клан*: {clan_name}",
-        f"*TH*: {th}",
-        f"*Трофеи*: {trophies}",
-        f"*Донаты*: {donations} / получено {donations_received}",
-        f"*War stars*: {war_stars}",
-        f"*Attack wins*: {attack_wins}",
-        f"*Defense wins*: {defense_wins}",
+        f"<b>{STAT_LABELS['profile']}</b>: {name} ({tag})",
+        f"<b>{STAT_LABELS['clan']}</b>: {clan_name}",
+        f"<b>{STAT_LABELS['townhall']}</b>: {th}",
+        f"<b>{STAT_LABELS['trophies']}</b>: {trophies}",
+        f"<b>{STAT_LABELS['donations']}</b>: {donations} / "
+        f"{STAT_LABELS['donations_received'].lower()} {donations_received}",
+        f"<b>{STAT_LABELS['war_stars']}</b>: {war_stars}",
+        f"<b>{STAT_LABELS['attack_wins']}</b>: {attack_wins}",
+        f"<b>{STAT_LABELS['defense_wins']}</b>: {defense_wins}",
     ]
     if war_summary:
         lines.append("")
@@ -70,7 +77,10 @@ async def _load_warlog_summary(coc_client: CocClient, clan_tag: str, player_tag:
                 break
     if total_battles == 0:
         return None
-    return f"*Warlog*: {total_attacks} атак, {total_stars} ⭐ за {total_battles} войн"
+    attacks = html.escape(str(total_attacks))
+    stars = html.escape(str(total_stars))
+    battles = html.escape(str(total_battles))
+    return f"<b>{STAT_LABELS['warlog']}</b>: {attacks} атак, {stars} ⭐ за {battles} войн"
 
 
 async def _load_capital_summary(
@@ -91,7 +101,7 @@ async def _load_capital_summary(
         if member.get("tag") == player_tag:
             attacks = member.get("attacks", 0)
             loot = member.get("capitalResourcesLooted", 0)
-            return f"*Столица*: {attacks} атак, золото {loot}"
+            return f"<b>{STAT_LABELS['capital']}</b>: {attacks} атак, золото {loot}"
     return None
 
 
@@ -130,6 +140,13 @@ async def mystats_command(
     await message.answer(
         "Экран статистики.",
         reply_markup=stats_menu_reply(),
+    )
+    await send_hint_once(
+        message,
+        sessionmaker,
+        user.telegram_id,
+        "seen_hint_stats",
+        STATS_HINT,
     )
 
 
@@ -241,11 +258,11 @@ async def _send_or_edit_stats(
                     chat_id=message.chat.id,
                     message_id=user.last_stats_message_id,
                     text=text,
-                    parse_mode="Markdown",
+                    parse_mode=ParseMode.HTML,
                 )
                 return
             except Exception:  # noqa: BLE001
                 pass
-        sent = await message.answer(text, parse_mode="Markdown")
+        sent = await message.answer(text, parse_mode=ParseMode.HTML)
         user.last_stats_message_id = sent.message_id
         await session.commit()

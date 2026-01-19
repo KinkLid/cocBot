@@ -20,6 +20,8 @@ from bot.keyboards.common import (
 )
 from bot.services.permissions import is_admin
 from bot.services.coc_client import CocClient
+from bot.services.hints import send_hint_once
+from bot.texts.hints import NOTIFY_HINT
 from bot.utils.navigation import pop_menu, reset_menu, set_menu
 from bot.utils.notify_time import format_duration_ru, parse_delay_to_minutes
 from bot.utils.state import reset_state_if_any
@@ -144,6 +146,13 @@ async def notify_command(
     await message.answer(
         "Раздел уведомлений.",
         reply_markup=notify_menu_reply(dm_enabled, prefs["dm_window"], prefs["dm_categories"]),
+    )
+    await send_hint_once(
+        message,
+        sessionmaker,
+        message.from_user.id,
+        "seen_hint_notify",
+        NOTIFY_HINT,
     )
 
 

@@ -20,6 +20,8 @@ from bot.keyboards.common import main_menu_reply, targets_admin_reply, targets_m
 from bot.keyboards.targets import targets_select_kb
 from bot.services.permissions import is_admin
 from bot.services.coc_client import CocClient
+from bot.services.hints import send_hint_once
+from bot.texts.hints import TARGETS_HINT
 from bot.utils.navigation import reset_menu
 from bot.utils.state import reset_state_if_any
 from bot.utils.validators import normalize_tag
@@ -368,6 +370,13 @@ async def targets_select_button(
             reply_markup=_menu_reply(config, message.from_user.id),
         )
         return
+    await send_hint_once(
+        message,
+        sessionmaker,
+        user.telegram_id,
+        "seen_hint_targets",
+        TARGETS_HINT,
+    )
     enemies = _sorted_enemies(war.get("opponent", {}).get("members", []))
     if not enemies:
         await message.answer("Нет списка противников.", reply_markup=_menu_reply(config, message.from_user.id))
