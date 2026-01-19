@@ -71,11 +71,11 @@ async def _is_exempt(event: Message | CallbackQuery, state_value: str | None) ->
         text = (event.text or "").strip()
         if text.startswith(("/start", "/help", "/register")):
             return True
-        if text in {"Регистрация", "Помощь / Гайд", "Главное меню"}:
+        if text in {"Регистрация", "Помощь / Гайд", "📜 Правила клана", "Главное меню"}:
             return True
         return False
     data = event.data or ""
-    return data in {"menu:register", "menu:guide", "hint:ok"}
+    return data in {"menu:register", "menu:guide", "menu:rules", "hint:ok"}
 
 
 async def _deny_access(

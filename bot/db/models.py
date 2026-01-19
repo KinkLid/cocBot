@@ -263,3 +263,39 @@ class NotificationInstance(Base):
     status: Mapped[str] = mapped_column(String(16), default="pending")
     payload: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class Complaint(Base):
+    __tablename__ = "complaints"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_by_tg_id: Mapped[Optional[int]] = mapped_column(BigInteger)
+    created_by_tg_name: Mapped[Optional[str]] = mapped_column(String(128))
+    target_player_tag: Mapped[str] = mapped_column(String(16))
+    target_player_name: Mapped[str] = mapped_column(String(64))
+    text: Mapped[str] = mapped_column(Text)
+    type: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(16), default="open")
+
+
+class WarAttackEvent(Base):
+    __tablename__ = "war_attack_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    war_tag: Mapped[str] = mapped_column(String(32))
+    attacker_tag: Mapped[str] = mapped_column(String(16))
+    defender_tag: Mapped[str] = mapped_column(String(16))
+    attack_order: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "war_tag",
+            "attacker_tag",
+            "defender_tag",
+            "attack_order",
+            name="uq_war_attack_event",
+        ),
+        Index("idx_war_attack_event_war", "war_tag"),
+    )

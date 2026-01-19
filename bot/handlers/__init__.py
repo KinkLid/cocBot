@@ -1,3 +1,3 @@
-from bot.handlers import admin, common, hints, notify, registration, stats, targets
+from bot.handlers import admin, common, complaints, hints, notify, registration, stats, targets
 
-__all__ = ["admin", "common", "hints", "notify", "registration", "stats", "targets"]
+__all__ = ["admin", "common", "complaints", "hints", "notify", "registration", "stats", "targets"]

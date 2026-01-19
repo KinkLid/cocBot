@@ -10,6 +10,8 @@ def main_menu_inline(is_admin: bool) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="Моя статистика", callback_data="menu:mystats")],
         [InlineKeyboardButton(text="🔔 Уведомления", callback_data="menu:notify")],
         [InlineKeyboardButton(text="Цели на войне", callback_data="menu:targets")],
+        [InlineKeyboardButton(text="📜 Правила клана", callback_data="menu:rules")],
+        [InlineKeyboardButton(text="📣 Жалоба", callback_data="menu:complaint")],
         [InlineKeyboardButton(text="Помощь / Гайд", callback_data="menu:guide")],
     ]
     if is_admin:
@@ -21,7 +23,8 @@ def main_menu_reply(is_admin: bool) -> ReplyKeyboardMarkup:
     keyboard = [
         [KeyboardButton(text="Регистрация"), KeyboardButton(text="Мой профиль")],
         [KeyboardButton(text="Моя статистика"), KeyboardButton(text="🔔 Уведомления")],
-        [KeyboardButton(text="Цели на войне"), KeyboardButton(text="Помощь / Гайд")],
+        [KeyboardButton(text="Цели на войне"), KeyboardButton(text="📜 Правила клана")],
+        [KeyboardButton(text="📣 Жалоба"), KeyboardButton(text="Помощь / Гайд")],
     ]
     if is_admin:
         keyboard.append([KeyboardButton(text="Админ-панель")])
@@ -109,7 +112,7 @@ def targets_admin_reply() -> ReplyKeyboardMarkup:
 def admin_menu_reply(missed_label: str | None = None) -> ReplyKeyboardMarkup:
     keyboard = [
         [KeyboardButton(text="Очистить игрока"), KeyboardButton(text="Диагностика")],
-        [KeyboardButton(text="👥 Пользователи")],
+        [KeyboardButton(text="👥 Пользователи"), KeyboardButton(text="📣 Жалобы")],
     ]
     if missed_label:
         keyboard.append([KeyboardButton(text=missed_label)])
