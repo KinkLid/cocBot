@@ -13,6 +13,7 @@ from bot.db import models
 from bot.keyboards.common import main_menu_reply
 from bot.services.coc_client import CocClient
 from bot.services.permissions import is_admin
+from bot.ui.labels import label
 
 logger = logging.getLogger(__name__)
 
@@ -181,7 +182,7 @@ class ClanAccessMiddleware(BaseMiddleware):
                 event,
                 self._config,
                 telegram_id,
-                "Вы ещё не зарегистрированы. Нажмите «Регистрация».",
+                f"Вы ещё не зарегистрированы. Нажмите «{label('register')}».",
             )
             return None
         if not is_admin(telegram_id, self._config):

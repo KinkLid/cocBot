@@ -19,6 +19,7 @@ from bot.keyboards.complaints import complaint_admin_kb, complaint_text_reply, c
 from bot.services.coc_client import CocClient
 from bot.services.complaints import build_complaint_message, notify_admins_about_complaint
 from bot.services.permissions import is_admin
+from bot.ui.labels import is_main_menu, label, label_variants
 from bot.utils.navigation import reset_menu
 from bot.utils.state import reset_state_if_any
 from bot.utils.validators import normalize_tag
@@ -78,7 +79,7 @@ async def start_complaint_flow(
     )
 
 
-@router.message(F.text == "📣 Жалоба")
+@router.message(F.text.in_(label_variants("complaint")))
 async def complaint_button(
     message: Message,
     state: FSMContext,
@@ -193,7 +194,7 @@ async def complaint_choose_target_message(
     state: FSMContext,
     config: BotConfig,
 ) -> None:
-    if message.text == "Главное меню":
+    if is_main_menu(message.text):
         await reset_state_if_any(state)
         await reset_menu(state)
         await message.answer(
@@ -214,7 +215,7 @@ async def complaint_text(
     config: BotConfig,
     sessionmaker: async_sessionmaker,
 ) -> None:
-    if message.text == "Главное меню":
+    if is_main_menu(message.text):
         await reset_state_if_any(state)
         await reset_menu(state)
         await message.answer(
@@ -235,7 +236,7 @@ async def complaint_text(
     if not target_tag or not target_name:
         await reset_state_if_any(state)
         await message.answer(
-            "Не удалось определить игрока. Нажмите «📣 Жалоба» ещё раз.",
+            f"Не удалось определить игрока. Нажмите «{label('complaint')}» ещё раз.",
             reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
         )
         return
@@ -263,7 +264,7 @@ async def complaint_text(
     )
 
 
-@router.message(F.text == "📣 Жалобы")
+@router.message(F.text.in_(label_variants("complaints")))
 async def admin_complaints_list(
     message: Message,
     state: FSMContext,

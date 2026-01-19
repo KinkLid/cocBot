@@ -22,6 +22,7 @@ from bot.services.permissions import is_admin
 from bot.services.coc_client import CocClient
 from bot.services.hints import send_hint_once
 from bot.texts.hints import TARGETS_HINT
+from bot.ui.labels import admin_unclaim_label, is_back, is_main_menu, label, label_variants
 from bot.utils.navigation import reset_menu
 from bot.utils.state import reset_state_if_any
 from bot.utils.validators import normalize_tag
@@ -263,10 +264,12 @@ async def _build_selection_markup(
         for claim in claims:
             if claim.claimed_by_telegram_id == user_id:
                 continue
-            label = f"🔧 #{claim.enemy_position}"
-            if claim.external_player_name:
-                label = f"🔧 #{claim.enemy_position} {claim.external_player_name}"
-            admin_rows.append((label, f"targets:admin-unclaim:{claim.enemy_position}"))
+            admin_rows.append(
+                (
+                    admin_unclaim_label(claim.enemy_position, claim.external_player_name),
+                    f"targets:admin-unclaim:{claim.enemy_position}",
+                )
+            )
     return targets_select_kb(enemies, taken, my_claims, admin_rows=admin_rows)
 
 
@@ -316,7 +319,7 @@ async def targets_command(
     )
 
 
-@router.message(F.text == "Цели на войне")
+@router.message(F.text.in_(label_variants("targets")))
 async def targets_button(
     message: Message,
     state: FSMContext,
@@ -327,7 +330,7 @@ async def targets_button(
     await targets_command(message, state, config, coc_client, sessionmaker)
 
 
-@router.message(F.text == "Выбрать противника")
+@router.message(F.text.in_(label_variants("targets_select")))
 async def targets_select_button(
     message: Message,
     state: FSMContext,
@@ -355,7 +358,7 @@ async def targets_select_button(
     if not user:
         logger.info("Targets select blocked: not registered (telegram_id=%s)", message.from_user.id)
         await message.answer(
-            "Вы ещё не зарегистрированы. Нажмите «Регистрация».",
+            f"Вы ещё не зарегистрированы. Нажмите «{label('register')}».",
             reply_markup=_menu_reply(config, message.from_user.id),
         )
         return
@@ -392,7 +395,7 @@ async def targets_select_button(
     )
 
 
-@router.message(F.text == "Таблица целей")
+@router.message(F.text.in_(label_variants("targets_table")))
 async def targets_table_button(
     message: Message,
     state: FSMContext,
@@ -452,7 +455,7 @@ async def target_claim(
     war_row = await _ensure_war_row(sessionmaker, war)
     user = await _load_user(sessionmaker, user_id)
     if not user:
-        await callback.message.answer("Сначала зарегистрируйтесь. Нажмите «Регистрация».")
+        await callback.message.answer(f"Сначала зарегистрируйтесь. Нажмите «{label('register')}».")
         return
     if not _is_user_in_war(user, war):
         logger.info(
@@ -626,7 +629,7 @@ async def target_toggle(
     war_row = await _ensure_war_row(sessionmaker, war)
     user = await _load_user(sessionmaker, user_id)
     if not user:
-        await callback.message.answer("Сначала зарегистрируйтесь. Нажмите «Регистрация».")
+        await callback.message.answer(f"Сначала зарегистрируйтесь. Нажмите «{label('register')}».")
         return
     if not _is_user_in_war(user, war):
         logger.info(
@@ -758,7 +761,7 @@ async def target_admin_unclaim(
     await callback.message.answer(f"Назначение для цели #{position} снято.")
 
 
-@router.message(F.text == "🛠 Назначить другому")
+@router.message(F.text.in_(label_variants("targets_assign")))
 async def targets_assign_other(
     message: Message,
     state: FSMContext,
@@ -833,7 +836,7 @@ async def targets_assign_name(
         await state.clear()
         await message.answer("Доступно только администраторам.")
         return
-    if message.text == "Главное меню":
+    if is_main_menu(message.text):
         await state.clear()
         await reset_menu(state)
         await message.answer(
@@ -841,7 +844,7 @@ async def targets_assign_name(
             reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
         )
         return
-    if message.text == "Назад":
+    if is_back(message.text):
         await state.clear()
         await message.answer(
             "Действие отменено.",

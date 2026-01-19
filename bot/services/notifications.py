@@ -17,6 +17,7 @@ from bot.config import BotConfig
 from bot.db import models
 from bot.services.coc_client import CocClient
 from bot.services.complaints import notify_admins_about_complaint
+from bot.ui.labels import label
 from bot.utils.coc_time import parse_coc_time
 from bot.utils.notify_time import format_duration_ru
 from bot.utils.war_attacks import build_missed_attacks_table, build_total_attacks_table, collect_missed_attacks
@@ -424,7 +425,7 @@ class NotificationService:
             text = (
                 "<b>🛡 Началась подготовка к войне.</b>\n"
                 f"Противник: {opponent}\n"
-                "Нажмите «Цели на войне» → «Выбрать противника»."
+                f"Нажмите «{label('targets')}» → «{label('targets_select')}»."
             )
             dm_text = f"Началась подготовка к войне против {opponent}."
             notify_type = "war_preparation"

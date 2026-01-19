@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
+from bot.ui.labels import label, member_label
+
 
 def complaints_members_kb(
     members: list[dict],
@@ -16,7 +18,7 @@ def complaints_members_kb(
         name = member.get("name", "Игрок")
         tag = member.get("tag", "")
         buttons.append(
-            [InlineKeyboardButton(text=f"{name} ({tag})", callback_data=f"complaint:target:{tag}")]
+            [InlineKeyboardButton(text=member_label(name, tag), callback_data=f"complaint:target:{tag}")]
         )
 
     nav_row: list[InlineKeyboardButton] = []
@@ -27,20 +29,20 @@ def complaints_members_kb(
     if nav_row:
         buttons.append(nav_row)
 
-    buttons.append([InlineKeyboardButton(text="Отмена", callback_data="complaint:cancel")])
+    buttons.append([InlineKeyboardButton(text=label("cancel"), callback_data="complaint:cancel")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def complaint_admin_kb(complaint_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"complaint:delete:{complaint_id}")]
+            [InlineKeyboardButton(text=label("delete"), callback_data=f"complaint:delete:{complaint_id}")]
         ]
     )
 
 
 def complaint_text_reply() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="Главное меню")]],
+        keyboard=[[KeyboardButton(text=label("main_menu"))]],
         resize_keyboard=True,
     )
