@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+import html
 from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
@@ -16,14 +17,17 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from bot.config import BotConfig
 from bot.db import models
 from bot.keyboards.common import (
+    admin_blacklist_menu_reply,
     admin_action_reply,
     admin_menu_reply,
     admin_notify_category_reply,
     admin_notify_menu_reply,
+    admin_whitelist_menu_reply,
     main_menu_reply,
     notify_rules_action_reply,
     notify_rules_type_reply,
 )
+from bot.keyboards.blacklist import blacklist_members_kb
 from bot.services.commands import register_bot_commands
 from bot.services.coc_client import CocClient
 from bot.services.hints import send_hint_once
@@ -35,14 +39,17 @@ from bot.utils.navigation import pop_menu, reset_menu, set_menu
 from bot.utils.notify_time import format_duration_ru, parse_delay_to_minutes
 from bot.utils.state import reset_state_if_any
 from bot.utils.tables import build_pre_table
+from bot.utils.tokens import hash_token, token_last4
 from bot.utils.war_attacks import build_missed_attacks_table, collect_missed_attacks
 from bot.utils.war_state import find_current_cwl_war, get_missed_attacks_label
 from bot.utils.notification_rules import schedule_rule_for_active_event
+from bot.utils.validators import is_valid_tag, normalize_tag
 
 logger = logging.getLogger(__name__)
 router = Router()
 
 USERS_PAGE_SIZE = 10
+BLACKLIST_PAGE_SIZE = 10
 ADMIN_EVENT_LABELS = {
     "war": "КВ",
     "cwl": "ЛВК",
@@ -60,6 +67,12 @@ class AdminState(StatesGroup):
     rule_edit_delay = State()
     rule_edit_text = State()
     rule_toggle_delete = State()
+    blacklist_add_tag = State()
+    blacklist_add_reason = State()
+    blacklist_remove_tag = State()
+    whitelist_add_token = State()
+    whitelist_add_comment = State()
+    whitelist_remove_token = State()
 
 
 async def _get_chat_prefs(
@@ -167,6 +180,40 @@ def _users_table(
     )
 
 
+async def _load_clan_members(coc_client: CocClient, clan_tag: str) -> list[dict]:
+    data = await coc_client.get_clan_members(clan_tag)
+    members = data.get("items", [])
+    return sorted(members, key=lambda member: member.get("clanRank") or 0)
+
+
+def _blacklist_table(entries: list[models.BlacklistPlayer], zone: ZoneInfo) -> str:
+    rows: list[list[str]] = []
+    for entry in entries:
+        created_at = _format_datetime(entry.created_at, zone)
+        reason = entry.reason or "—"
+        rows.append([entry.player_tag, reason, str(entry.added_by_admin_id), created_at])
+    return build_pre_table(
+        ["Тег", "Причина", "Админ", "Дата"],
+        rows,
+        max_widths=[14, 24, 12, 16],
+    )
+
+
+def _whitelist_table(entries: list[models.WhitelistToken], zone: ZoneInfo) -> str:
+    rows: list[list[str]] = []
+    for entry in entries:
+        created_at = _format_datetime(entry.created_at, zone)
+        suffix = entry.token_last4 or "—"
+        token_mask = f"***{suffix}" if suffix != "—" else "—"
+        comment = entry.comment or "—"
+        rows.append([str(entry.id), token_mask, str(entry.added_by_admin_id), created_at, comment])
+    return build_pre_table(
+        ["ID", "Токен", "Админ", "Дата", "Комментарий"],
+        rows,
+        max_widths=[6, 10, 12, 16, 24],
+    )
+
+
 def _users_pagination_kb(page: int, total_pages: int) -> InlineKeyboardMarkup:
     buttons: list[list[InlineKeyboardButton]] = []
     nav_row: list[InlineKeyboardButton] = []
@@ -215,6 +262,12 @@ async def _show_admin_menu_for_stack(
     if current == "admin_menu":
         missed_label = await get_missed_attacks_label(coc_client, config.clan_tag)
         await message.answer("Админ-панель.", reply_markup=admin_menu_reply(missed_label))
+        return
+    if current == "admin_blacklist":
+        await message.answer("Чёрный список.", reply_markup=admin_blacklist_menu_reply())
+        return
+    if current == "admin_whitelist":
+        await message.answer("Вайтлист токенов.", reply_markup=admin_whitelist_menu_reply())
         return
     if current == "admin_notify_menu":
         await message.answer("Уведомления: общий чат.", reply_markup=admin_notify_menu_reply())
@@ -468,6 +521,500 @@ async def admin_users_page(
         page = int(payload[1])
         await _send_users_page(callback.message, page, config, sessionmaker, coc_client)
         return
+
+
+@router.message(F.text == "🚫 Чёрный список")
+async def admin_blacklist_menu(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+) -> None:
+    await reset_state_if_any(state)
+    if not is_admin(message.from_user.id, config):
+        await message.answer(
+            "Админ-панель доступна только администраторам.",
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        )
+        return
+    await set_menu(state, "admin_blacklist")
+    await message.answer("Чёрный список.", reply_markup=admin_blacklist_menu_reply())
+
+
+@router.message(F.text == "✅ Вайтлист токенов")
+async def admin_whitelist_menu(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+) -> None:
+    await reset_state_if_any(state)
+    if not is_admin(message.from_user.id, config):
+        await message.answer(
+            "Админ-панель доступна только администраторам.",
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        )
+        return
+    await set_menu(state, "admin_whitelist")
+    await message.answer("Вайтлист токенов.", reply_markup=admin_whitelist_menu_reply())
+
+
+@router.message(F.text == "➕ Добавить в ЧС")
+async def admin_blacklist_add_start(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    coc_client: CocClient,
+) -> None:
+    await reset_state_if_any(state)
+    if not is_admin(message.from_user.id, config):
+        await message.answer(
+            "Админ-панель доступна только администраторам.",
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        )
+        return
+    await state.set_state(AdminState.blacklist_add_tag)
+    try:
+        members = await _load_clan_members(coc_client, config.clan_tag)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to load clan members for blacklist: %s", exc)
+        members = []
+    if members:
+        await message.answer(
+            "Выберите игрока из списка или пришлите тег вручную.",
+            reply_markup=blacklist_members_kb(members, page=1, page_size=BLACKLIST_PAGE_SIZE),
+        )
+    else:
+        await message.answer(
+            "Пришлите тег игрока для ЧС.",
+            reply_markup=admin_action_reply(),
+        )
+
+
+@router.callback_query(F.data.startswith("blacklist:page:"))
+async def admin_blacklist_page(
+    callback: CallbackQuery,
+    state: FSMContext,
+    config: BotConfig,
+    coc_client: CocClient,
+) -> None:
+    await callback.answer()
+    if not is_admin(callback.from_user.id, config):
+        if callback.message:
+            await callback.message.answer("Админ-панель доступна только администраторам.")
+        return
+    try:
+        page = int((callback.data or "").split(":")[-1])
+    except ValueError:
+        return
+    try:
+        members = await _load_clan_members(coc_client, config.clan_tag)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to reload clan members for blacklist: %s", exc)
+        return
+    if callback.message:
+        await callback.message.edit_reply_markup(
+            reply_markup=blacklist_members_kb(members, page=page, page_size=BLACKLIST_PAGE_SIZE)
+        )
+
+
+@router.callback_query(F.data == "blacklist:cancel")
+async def admin_blacklist_cancel(
+    callback: CallbackQuery,
+    state: FSMContext,
+    config: BotConfig,
+) -> None:
+    await callback.answer("Отменено")
+    await reset_state_if_any(state)
+    if not is_admin(callback.from_user.id, config):
+        return
+    await callback.message.answer("Чёрный список.", reply_markup=admin_blacklist_menu_reply())
+
+
+@router.callback_query(F.data.startswith("blacklist:target:"))
+async def admin_blacklist_pick_target(
+    callback: CallbackQuery,
+    state: FSMContext,
+    config: BotConfig,
+) -> None:
+    await callback.answer()
+    if not is_admin(callback.from_user.id, config):
+        if callback.message:
+            await callback.message.answer("Админ-панель доступна только администраторам.")
+        return
+    tag = (callback.data or "").split(":", 2)[-1]
+    normalized_tag = normalize_tag(tag)
+    if not is_valid_tag(normalized_tag):
+        if callback.message:
+            await callback.message.answer("Некорректный тег. Попробуйте ещё раз.")
+        return
+    await state.set_state(AdminState.blacklist_add_reason)
+    await state.update_data(blacklist_player_tag=normalized_tag)
+    if callback.message:
+        await callback.message.answer(
+            f"Введите причину для ЧС (или напишите «без причины»):",
+            reply_markup=admin_action_reply(),
+        )
+
+
+@router.message(AdminState.blacklist_add_tag)
+async def admin_blacklist_add_tag(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+    coc_client: CocClient,
+) -> None:
+    if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
+        return
+    tag = normalize_tag(message.text or "")
+    if not is_valid_tag(tag):
+        await message.answer(
+            "Некорректный тег. Пример: #ABC123",
+            reply_markup=admin_action_reply(),
+        )
+        return
+    await state.set_state(AdminState.blacklist_add_reason)
+    await state.update_data(blacklist_player_tag=tag)
+    await message.answer(
+        "Введите причину для ЧС (или напишите «без причины»):",
+        reply_markup=admin_action_reply(),
+    )
+
+
+@router.message(AdminState.blacklist_add_reason)
+async def admin_blacklist_add_reason(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+    coc_client: CocClient,
+) -> None:
+    if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
+        return
+    data = await state.get_data()
+    player_tag = data.get("blacklist_player_tag")
+    if not player_tag:
+        await reset_state_if_any(state)
+        await message.answer("Не удалось определить игрока.", reply_markup=admin_blacklist_menu_reply())
+        return
+    reason_text = (message.text or "").strip()
+    reason = None if reason_text.lower() == "без причины" else reason_text
+    async with sessionmaker() as session:
+        entry = (
+            await session.execute(
+                select(models.BlacklistPlayer).where(models.BlacklistPlayer.player_tag == player_tag)
+            )
+        ).scalar_one_or_none()
+        if entry:
+            entry.reason = reason
+            entry.added_by_admin_id = message.from_user.id
+            entry.created_at = datetime.now(timezone.utc)
+            entry.is_active = True
+        else:
+            session.add(
+                models.BlacklistPlayer(
+                    player_tag=player_tag,
+                    reason=reason,
+                    added_by_admin_id=message.from_user.id,
+                    created_at=datetime.now(timezone.utc),
+                    is_active=True,
+                )
+            )
+        await session.commit()
+    await reset_state_if_any(state)
+    await message.answer(
+        f"Игрок {html.escape(player_tag)} добавлен в ЧС.",
+        reply_markup=admin_blacklist_menu_reply(),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@router.message(F.text == "📋 Показать ЧС")
+async def admin_blacklist_list(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+) -> None:
+    await reset_state_if_any(state)
+    if not is_admin(message.from_user.id, config):
+        await message.answer(
+            "Админ-панель доступна только администраторам.",
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        )
+        return
+    async with sessionmaker() as session:
+        entries = (
+            await session.execute(
+                select(models.BlacklistPlayer)
+                .where(models.BlacklistPlayer.is_active.is_(True))
+                .order_by(models.BlacklistPlayer.created_at.desc())
+            )
+        ).scalars().all()
+    if not entries:
+        await message.answer("Чёрный список пуст.", reply_markup=admin_blacklist_menu_reply())
+        return
+    zone = ZoneInfo(config.timezone)
+    table = _blacklist_table(entries, zone)
+    await message.answer(
+        f"Активные записи ЧС: {len(entries)}.\n{table}",
+        reply_markup=admin_blacklist_menu_reply(),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@router.message(F.text == "🗑 Удалить из ЧС")
+async def admin_blacklist_remove_start(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+) -> None:
+    await reset_state_if_any(state)
+    if not is_admin(message.from_user.id, config):
+        await message.answer(
+            "Админ-панель доступна только администраторам.",
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        )
+        return
+    await state.set_state(AdminState.blacklist_remove_tag)
+    await message.answer(
+        "Пришлите тег игрока для удаления из ЧС.",
+        reply_markup=admin_action_reply(),
+    )
+
+
+@router.message(AdminState.blacklist_remove_tag)
+async def admin_blacklist_remove(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+    coc_client: CocClient,
+) -> None:
+    if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
+        return
+    tag = normalize_tag(message.text or "")
+    if not is_valid_tag(tag):
+        await message.answer("Некорректный тег. Пример: #ABC123", reply_markup=admin_action_reply())
+        return
+    async with sessionmaker() as session:
+        entry = (
+            await session.execute(
+                select(models.BlacklistPlayer)
+                .where(models.BlacklistPlayer.player_tag == tag)
+                .where(models.BlacklistPlayer.is_active.is_(True))
+            )
+        ).scalar_one_or_none()
+        if not entry:
+            await message.answer("Игрок не найден в активном ЧС.", reply_markup=admin_blacklist_menu_reply())
+            return
+        entry.is_active = False
+        await session.commit()
+    await reset_state_if_any(state)
+    await message.answer(
+        f"Игрок {html.escape(tag)} удалён из ЧС.",
+        reply_markup=admin_blacklist_menu_reply(),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@router.message(F.text == "➕ Добавить токен")
+async def admin_whitelist_add_start(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+) -> None:
+    await reset_state_if_any(state)
+    if not is_admin(message.from_user.id, config):
+        await message.answer(
+            "Админ-панель доступна только администраторам.",
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        )
+        return
+    await state.set_state(AdminState.whitelist_add_token)
+    await message.answer(
+        "Пришлите API token игрока.",
+        reply_markup=admin_action_reply(),
+    )
+
+
+@router.message(AdminState.whitelist_add_token)
+async def admin_whitelist_add_token(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+    coc_client: CocClient,
+) -> None:
+    if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
+        return
+    token = (message.text or "").strip()
+    if not token:
+        await message.answer("Нужен токен.", reply_markup=admin_action_reply())
+        return
+    token_hash = hash_token(token, config.token_salt)
+    await state.update_data(whitelist_token_hash=token_hash, whitelist_token_last4=token_last4(token))
+    await state.set_state(AdminState.whitelist_add_comment)
+    await message.answer(
+        "Введите комментарий (или напишите «без комментария»):",
+        reply_markup=admin_action_reply(),
+    )
+
+
+@router.message(AdminState.whitelist_add_comment)
+async def admin_whitelist_add_comment(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+    coc_client: CocClient,
+) -> None:
+    if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
+        return
+    data = await state.get_data()
+    token_hash = data.get("whitelist_token_hash")
+    last4 = data.get("whitelist_token_last4")
+    if not token_hash:
+        await reset_state_if_any(state)
+        await message.answer("Не удалось обработать токен.", reply_markup=admin_whitelist_menu_reply())
+        return
+    comment_text = (message.text or "").strip()
+    comment = None if comment_text.lower() == "без комментария" else comment_text
+    async with sessionmaker() as session:
+        entry = (
+            await session.execute(
+                select(models.WhitelistToken).where(models.WhitelistToken.token_hash == token_hash)
+            )
+        ).scalar_one_or_none()
+        if entry:
+            entry.token_last4 = last4
+            entry.comment = comment
+            entry.added_by_admin_id = message.from_user.id
+            entry.created_at = datetime.now(timezone.utc)
+            entry.is_active = True
+        else:
+            session.add(
+                models.WhitelistToken(
+                    token_hash=token_hash,
+                    token_last4=last4,
+                    comment=comment,
+                    added_by_admin_id=message.from_user.id,
+                    created_at=datetime.now(timezone.utc),
+                    is_active=True,
+                )
+            )
+        await session.commit()
+    await reset_state_if_any(state)
+    await message.answer(
+        f"Токен добавлен в вайтлист (***{html.escape(last4 or '')}).",
+        reply_markup=admin_whitelist_menu_reply(),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@router.message(F.text == "📋 Показать вайтлист")
+async def admin_whitelist_list(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+) -> None:
+    await reset_state_if_any(state)
+    if not is_admin(message.from_user.id, config):
+        await message.answer(
+            "Админ-панель доступна только администраторам.",
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        )
+        return
+    async with sessionmaker() as session:
+        entries = (
+            await session.execute(
+                select(models.WhitelistToken)
+                .where(models.WhitelistToken.is_active.is_(True))
+                .order_by(models.WhitelistToken.created_at.desc())
+            )
+        ).scalars().all()
+    if not entries:
+        await message.answer("Вайтлист пуст.", reply_markup=admin_whitelist_menu_reply())
+        return
+    zone = ZoneInfo(config.timezone)
+    table = _whitelist_table(entries, zone)
+    await message.answer(
+        f"Активные токены: {len(entries)}.\n{table}",
+        reply_markup=admin_whitelist_menu_reply(),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@router.message(F.text == "🗑 Удалить токен")
+async def admin_whitelist_remove_start(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+) -> None:
+    await reset_state_if_any(state)
+    if not is_admin(message.from_user.id, config):
+        await message.answer(
+            "Админ-панель доступна только администраторам.",
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        )
+        return
+    await state.set_state(AdminState.whitelist_remove_token)
+    await message.answer(
+        "Пришлите ID токена или последние 4 символа.",
+        reply_markup=admin_action_reply(),
+    )
+
+
+@router.message(AdminState.whitelist_remove_token)
+async def admin_whitelist_remove(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+    coc_client: CocClient,
+) -> None:
+    if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
+        return
+    raw_value = (message.text or "").strip()
+    if not raw_value:
+        await message.answer("Нужно указать ID или последние 4 символа.", reply_markup=admin_action_reply())
+        return
+    async with sessionmaker() as session:
+        entry = None
+        if raw_value.isdigit():
+            entry = (
+                await session.execute(
+                    select(models.WhitelistToken)
+                    .where(models.WhitelistToken.id == int(raw_value))
+                    .where(models.WhitelistToken.is_active.is_(True))
+                )
+            ).scalar_one_or_none()
+        else:
+            matches = (
+                await session.execute(
+                    select(models.WhitelistToken)
+                    .where(models.WhitelistToken.token_last4 == raw_value)
+                    .where(models.WhitelistToken.is_active.is_(True))
+                )
+            ).scalars().all()
+            if len(matches) > 1:
+                await message.answer(
+                    "Найдено несколько токенов с таким окончанием. Укажите ID.",
+                    reply_markup=admin_action_reply(),
+                )
+                return
+            entry = matches[0] if matches else None
+        if not entry:
+            await message.answer("Токен не найден.", reply_markup=admin_whitelist_menu_reply())
+            return
+        entry.is_active = False
+        await session.commit()
+    await reset_state_if_any(state)
+    await message.answer(
+        f"Токен ***{html.escape(entry.token_last4 or '')} удалён из вайтлиста.",
+        reply_markup=admin_whitelist_menu_reply(),
+        parse_mode=ParseMode.HTML,
+    )
 
 
 @router.message(F.text.startswith("📋 Кто не атаковал"))

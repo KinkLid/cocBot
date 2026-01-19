@@ -54,6 +54,15 @@ async def notify_admins_about_complaint(
 ) -> None:
     text = build_complaint_message(complaint, config.timezone)
     markup = complaint_admin_kb(complaint.id)
+    try:
+        await bot.send_message(
+            chat_id=config.main_chat_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=markup,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to send complaint %s to main chat: %s", complaint.id, exc)
     for admin_id in config.admin_telegram_ids:
         try:
             await bot.send_message(

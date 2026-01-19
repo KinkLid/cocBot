@@ -28,6 +28,7 @@ class User(Base):
     player_tag: Mapped[str] = mapped_column(String(16), unique=True)
     player_name: Mapped[str] = mapped_column(String(64))
     clan_tag: Mapped[str] = mapped_column(String(16))
+    token_hash: Mapped[Optional[str]] = mapped_column(String(64))
     last_clan_check_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     is_in_clan_cached: Mapped[Optional[bool]] = mapped_column(Boolean)
     first_seen_in_clan_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
@@ -299,3 +300,39 @@ class WarAttackEvent(Base):
         ),
         Index("idx_war_attack_event_war", "war_tag"),
     )
+
+
+class ClanMemberState(Base):
+    __tablename__ = "clan_member_state"
+
+    player_tag: Mapped[str] = mapped_column(String(16), primary_key=True)
+    last_seen_name: Mapped[str] = mapped_column(String(64))
+    last_seen_in_clan_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    last_left_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    last_rejoined_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    leave_count: Mapped[int] = mapped_column(Integer, default=0)
+    is_in_clan: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class BlacklistPlayer(Base):
+    __tablename__ = "blacklist_players"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    player_tag: Mapped[str] = mapped_column(String(16), unique=True)
+    reason: Mapped[Optional[str]] = mapped_column(Text)
+    added_by_admin_id: Mapped[int] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class WhitelistToken(Base):
+    __tablename__ = "whitelist_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    token_last4: Mapped[Optional[str]] = mapped_column(String(8))
+    comment: Mapped[Optional[str]] = mapped_column(Text)
+    added_by_admin_id: Mapped[int] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
