@@ -21,6 +21,7 @@ from bot.services.permissions import is_admin
 from bot.texts.hints import REGISTER_HINT
 from bot.utils.navigation import reset_menu
 from bot.utils.state import reset_state_if_any
+from bot.utils.tokens import hash_token
 from bot.utils.validators import is_valid_tag, normalize_tag
 from bot.utils.telegram import build_bot_dm_keyboard, build_bot_dm_link, try_send_dm
 
@@ -210,6 +211,7 @@ async def register_token(
             reply_markup=registration_reply(),
         )
         return
+    token_hash = hash_token(token, config.token_salt)
 
     async with sessionmaker() as session:
         existing = (
@@ -223,6 +225,7 @@ async def register_token(
             existing.username = message.from_user.username
             existing.last_clan_check_at = datetime.now(timezone.utc)
             existing.is_in_clan_cached = True
+            existing.token_hash = token_hash
             if existing.first_seen_in_clan_at is None:
                 existing.first_seen_in_clan_at = datetime.now(timezone.utc)
         else:
@@ -233,6 +236,7 @@ async def register_token(
                     player_tag=player_tag,
                     player_name=player_data.get("name", ""),
                     clan_tag=clan_tag,
+                    token_hash=token_hash,
                     last_clan_check_at=datetime.now(timezone.utc),
                     is_in_clan_cached=True,
                     first_seen_in_clan_at=datetime.now(timezone.utc),

@@ -12,6 +12,7 @@ def configure_scheduler(collector: StatsCollector, notifier: NotificationService
     scheduler.add_job(notifier.poll_war_state, "interval", seconds=90, id="war_state_poll")
     scheduler.add_job(notifier.poll_cwl_state, "interval", minutes=10, id="cwl_state_poll")
     scheduler.add_job(notifier.poll_capital_state, "interval", minutes=15, id="capital_state_poll")
+    scheduler.add_job(notifier.poll_clan_members, "interval", minutes=5, id="clan_members_poll")
     scheduler.add_job(
         notifier.dispatch_scheduled_notifications, "interval", seconds=60, id="scheduled_notifications"
     )

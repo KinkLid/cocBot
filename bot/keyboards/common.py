@@ -113,6 +113,7 @@ def admin_menu_reply(missed_label: str | None = None) -> ReplyKeyboardMarkup:
     keyboard = [
         [KeyboardButton(text="Очистить игрока"), KeyboardButton(text="Диагностика")],
         [KeyboardButton(text="👥 Пользователи"), KeyboardButton(text="📣 Жалобы")],
+        [KeyboardButton(text="🚫 Чёрный список"), KeyboardButton(text="✅ Вайтлист токенов")],
     ]
     if missed_label:
         keyboard.append([KeyboardButton(text=missed_label)])
@@ -120,6 +121,30 @@ def admin_menu_reply(missed_label: str | None = None) -> ReplyKeyboardMarkup:
     keyboard.append([KeyboardButton(text="Уведомления")])
     keyboard.append([KeyboardButton(text="Назад")])
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
+
+def admin_blacklist_menu_reply() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="➕ Добавить в ЧС")],
+            [KeyboardButton(text="📋 Показать ЧС")],
+            [KeyboardButton(text="🗑 Удалить из ЧС")],
+            [KeyboardButton(text="Назад")],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def admin_whitelist_menu_reply() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="➕ Добавить токен")],
+            [KeyboardButton(text="📋 Показать вайтлист")],
+            [KeyboardButton(text="🗑 Удалить токен")],
+            [KeyboardButton(text="Назад")],
+        ],
+        resize_keyboard=True,
+    )
 
 
 def notify_rules_type_reply() -> ReplyKeyboardMarkup:

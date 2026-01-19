@@ -17,6 +17,7 @@ class BotConfig:
     admin_telegram_ids: set[int]
     timezone: str
     database_url: str
+    token_salt: str
     log_level: str = "INFO"
     default_notify_channel: str = "dm"
 
@@ -40,6 +41,7 @@ def load_config() -> BotConfig:
     admin_ids = env.get("ADMIN_TELEGRAM_IDS", data.get("admin_telegram_ids", []))
     timezone = env.get("TIMEZONE", data.get("timezone", "Europe/Moscow"))
     database_url = env.get("DATABASE_URL", data.get("database_url"))
+    token_salt = env.get("TOKEN_SALT", data.get("token_salt"))
     log_level = env.get("LOG_LEVEL", data.get("log_level", "INFO"))
     default_notify_channel = env.get(
         "DEFAULT_NOTIFY_CHANNEL", data.get("default_notify_channel", "dm")
@@ -55,6 +57,8 @@ def load_config() -> BotConfig:
         raise RuntimeError("MAIN_CHAT_ID is required")
     if not database_url:
         raise RuntimeError("DATABASE_URL is required")
+    if not token_salt:
+        raise RuntimeError("TOKEN_SALT is required")
 
     if isinstance(admin_ids, str):
         admin_ids = {int(x) for x in admin_ids.split(",") if x.strip()}
@@ -69,6 +73,7 @@ def load_config() -> BotConfig:
         admin_telegram_ids=admin_ids,
         timezone=str(timezone),
         database_url=str(database_url),
+        token_salt=str(token_salt),
         log_level=str(log_level),
         default_notify_channel=str(default_notify_channel),
     )

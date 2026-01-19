@@ -64,6 +64,12 @@ def _state_is_registration(state_value: str | None) -> bool:
     return state_value.startswith("RegisterState")
 
 
+def _state_is_complaint(state_value: str | None) -> bool:
+    if not state_value:
+        return False
+    return state_value.startswith("ComplaintState")
+
+
 async def _is_exempt(event: Message | CallbackQuery, state_value: str | None) -> bool:
     if _state_is_registration(state_value):
         return True
@@ -76,6 +82,54 @@ async def _is_exempt(event: Message | CallbackQuery, state_value: str | None) ->
         return False
     data = event.data or ""
     return data in {"menu:register", "menu:guide", "menu:rules", "hint:ok"}
+
+
+async def _is_blacklist_exempt(event: Message | CallbackQuery, state_value: str | None) -> bool:
+    if _state_is_complaint(state_value):
+        return True
+    if isinstance(event, Message):
+        text = (event.text or "").strip()
+        if text.startswith(("/help", "/rules", "/complaint")):
+            return True
+        if text in {"📣 Жалоба", "Помощь / Гайд", "📜 Правила клана", "Главное меню"}:
+            return True
+        return False
+    data = event.data or ""
+    if data.startswith("complaint:"):
+        return True
+    return data in {"menu:complaint", "menu:guide", "menu:rules", "complaint:cancel"}
+
+
+async def _is_whitelisted_token(
+    sessionmaker: async_sessionmaker,
+    token_hash: str | None,
+) -> bool:
+    if not token_hash:
+        return False
+    async with sessionmaker() as session:
+        row = (
+            await session.execute(
+                select(models.WhitelistToken)
+                .where(models.WhitelistToken.token_hash == token_hash)
+                .where(models.WhitelistToken.is_active.is_(True))
+            )
+        ).scalar_one_or_none()
+        return row is not None
+
+
+async def _is_blacklisted_player(
+    sessionmaker: async_sessionmaker,
+    player_tag: str,
+) -> bool:
+    async with sessionmaker() as session:
+        row = (
+            await session.execute(
+                select(models.BlacklistPlayer)
+                .where(models.BlacklistPlayer.player_tag == player_tag)
+                .where(models.BlacklistPlayer.is_active.is_(True))
+            )
+        ).scalar_one_or_none()
+        return row is not None
 
 
 async def _deny_access(
@@ -130,6 +184,19 @@ class ClanAccessMiddleware(BaseMiddleware):
                 "Вы ещё не зарегистрированы. Нажмите «Регистрация».",
             )
             return None
+        if not is_admin(telegram_id, self._config):
+            whitelisted = await _is_whitelisted_token(self._sessionmaker, user.token_hash)
+            if not whitelisted:
+                blacklisted = await _is_blacklisted_player(self._sessionmaker, user.player_tag)
+                if blacklisted and not await _is_blacklist_exempt(event, state_value):
+                    logger.info("Access denied: blacklisted (telegram_id=%s player_tag=%s)", telegram_id, user.player_tag)
+                    await _deny_access(
+                        event,
+                        self._config,
+                        telegram_id,
+                        "Ваш доступ ограничен. Свяжитесь с админами.",
+                    )
+                    return None
         if not in_clan:
             logger.info(
                 "Access denied: not in clan (telegram_id=%s player_tag=%s)",

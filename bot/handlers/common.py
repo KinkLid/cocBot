@@ -140,8 +140,19 @@ async def me_command(
             reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
         )
         return
+    extra_line = ""
+    if is_admin(message.from_user.id, config):
+        async with sessionmaker() as session:
+            whitelisted = (
+                await session.execute(
+                    select(models.WhitelistToken)
+                    .where(models.WhitelistToken.token_hash == user.token_hash)
+                    .where(models.WhitelistToken.is_active.is_(True))
+                )
+            ).scalar_one_or_none()
+        extra_line = f"\nВайтлист токена: {'да' if whitelisted else 'нет'}"
     await message.answer(
-        f"Профиль: {user.player_name} ({user.player_tag})\nКлан: {user.clan_tag}",
+        f"Профиль: {user.player_name} ({user.player_tag})\nКлан: {user.clan_tag}{extra_line}",
         reply_markup=profile_menu_reply(),
     )
 

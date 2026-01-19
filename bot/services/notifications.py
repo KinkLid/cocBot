@@ -78,6 +78,132 @@ class NotificationService:
         self._sessionmaker = sessionmaker
         self._coc = coc_client
 
+    def _format_datetime(self, value: datetime | None) -> str:
+        if not value:
+            return "—"
+        zone = ZoneInfo(self._config.timezone)
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(zone).strftime("%Y-%m-%d %H:%M")
+
+    async def _send_rejoin_alert(self, payload: dict[str, Any]) -> None:
+        name = html.escape(payload["name"])
+        tag = html.escape(payload["tag"])
+        left_at = self._format_datetime(payload.get("left_at"))
+        rejoined_at = self._format_datetime(payload.get("rejoined_at"))
+        leave_count = payload.get("leave_count", 0)
+        whitelisted = payload.get("whitelisted", False)
+        lines = [
+            f"🔁 Игрок вернулся в клан: {name} ({tag})",
+            f"Ливнул: {left_at}, вернулся: {rejoined_at}, всего ливов: {leave_count}",
+        ]
+        if whitelisted:
+            lines.append("Вайтлист токена: да")
+        text = "\n".join(lines)
+        for admin_id in self._config.admin_telegram_ids:
+            try:
+                await self._bot.send_message(
+                    chat_id=admin_id,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to send rejoin alert to admin %s: %s", admin_id, exc)
+
+    async def poll_clan_members(self) -> None:
+        try:
+            data = await self._coc.get_clan_members(self._config.clan_tag)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to load clan members: %s", exc)
+            return
+        members = data.get("items", [])
+        now = datetime.now(timezone.utc)
+        current_members: dict[str, dict[str, Any]] = {}
+        for member in members:
+            tag = normalize_tag(member.get("tag", ""))
+            if tag:
+                current_members[tag] = member
+        async with self._sessionmaker() as session:
+            states = (await session.execute(select(models.ClanMemberState))).scalars().all()
+            state_map = {state.player_tag: state for state in states}
+            left_tags: list[str] = []
+            rejoined_payloads: list[dict[str, Any]] = []
+
+            for tag, member in current_members.items():
+                name = member.get("name", "Игрок")
+                state = state_map.get(tag)
+                if state:
+                    was_in_clan = state.is_in_clan
+                    state.last_seen_name = name
+                    state.last_seen_in_clan_at = now
+                    state.is_in_clan = True
+                    state.updated_at = now
+                    if not was_in_clan:
+                        state.last_rejoined_at = now
+                        rejoined_payloads.append(
+                            {
+                                "tag": tag,
+                                "name": name,
+                                "left_at": state.last_left_at,
+                                "rejoined_at": now,
+                                "leave_count": state.leave_count,
+                            }
+                        )
+                else:
+                    session.add(
+                        models.ClanMemberState(
+                            player_tag=tag,
+                            last_seen_name=name,
+                            last_seen_in_clan_at=now,
+                            last_left_at=None,
+                            last_rejoined_at=None,
+                            leave_count=0,
+                            is_in_clan=True,
+                            updated_at=now,
+                        )
+                    )
+
+            for tag, state in state_map.items():
+                if state.is_in_clan and tag not in current_members:
+                    state.is_in_clan = False
+                    state.last_left_at = now
+                    state.leave_count = (state.leave_count or 0) + 1
+                    state.updated_at = now
+                    left_tags.append(tag)
+
+            if rejoined_payloads:
+                tags = [payload["tag"] for payload in rejoined_payloads]
+                users = (
+                    await session.execute(select(models.User).where(models.User.player_tag.in_(tags)))
+                ).scalars().all()
+                tag_to_hash = {user.player_tag: user.token_hash for user in users if user.token_hash}
+                token_hashes = list(tag_to_hash.values())
+                whitelisted_hashes: set[str] = set()
+                if token_hashes:
+                    whitelisted_hashes = set(
+                        (
+                            await session.execute(
+                                select(models.WhitelistToken.token_hash)
+                                .where(models.WhitelistToken.token_hash.in_(token_hashes))
+                                .where(models.WhitelistToken.is_active.is_(True))
+                            )
+                        ).scalars().all()
+                    )
+                for payload in rejoined_payloads:
+                    token_hash = tag_to_hash.get(payload["tag"])
+                    payload["whitelisted"] = bool(token_hash and token_hash in whitelisted_hashes)
+
+            await session.commit()
+
+        if left_tags or rejoined_payloads:
+            logger.info(
+                "Clan members updated: left=%s rejoined=%s",
+                len(left_tags),
+                len(rejoined_payloads),
+            )
+        for payload in rejoined_payloads:
+            await self._send_rejoin_alert(payload)
+
     async def poll_war_state(self) -> None:
         try:
             war_data = await self._coc.get_current_war(self._config.clan_tag)
@@ -752,6 +878,27 @@ class NotificationService:
 
         created: list[tuple[models.Complaint, dict[str, Any]]] = []
         async with self._sessionmaker() as session:
+            attacker_tags = {violation["attacker_tag"] for violation in violations}
+            whitelisted_tags: set[str] = set()
+            if attacker_tags:
+                users = (
+                    await session.execute(select(models.User).where(models.User.player_tag.in_(attacker_tags)))
+                ).scalars().all()
+                tag_to_hash = {user.player_tag: user.token_hash for user in users if user.token_hash}
+                token_hashes = list(tag_to_hash.values())
+                if token_hashes:
+                    whitelisted_hashes = set(
+                        (
+                            await session.execute(
+                                select(models.WhitelistToken.token_hash)
+                                .where(models.WhitelistToken.token_hash.in_(token_hashes))
+                                .where(models.WhitelistToken.is_active.is_(True))
+                            )
+                        ).scalars().all()
+                    )
+                    whitelisted_tags = {
+                        tag for tag, token_hash in tag_to_hash.items() if token_hash in whitelisted_hashes
+                    }
             for violation in violations:
                 exists = (
                     await session.execute(
@@ -772,6 +919,8 @@ class NotificationService:
                         attack_order=violation["attack_order"],
                     )
                 )
+                if violation["attacker_tag"] in whitelisted_tags:
+                    continue
                 complaint_text = (
                     f"Атака на позицию #{violation['defender_position']} при своей позиции "
                     f"#{violation['attacker_position']}. Разница больше 10."

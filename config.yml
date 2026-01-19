@@ -6,5 +6,6 @@ admin_telegram_ids:
   - 969621591
 timezone: "Europe/Moscow"
 database_url: "postgresql+asyncpg://cocbot:cocbot@db:5432/cocbot"
+token_salt: "change-me"
 log_level: "INFO"
 default_notify_channel: "dm"
