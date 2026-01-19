@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message
+from aiogram.enums import ParseMode
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -19,8 +20,9 @@ from bot.keyboards.common import (
     admin_menu_reply,
     admin_notify_category_reply,
     admin_notify_menu_reply,
-    admin_reminder_type_reply,
     main_menu_reply,
+    notify_rules_action_reply,
+    notify_rules_type_reply,
 )
 from bot.services.coc_client import CocClient
 from bot.services.notifications import NotificationService, normalize_chat_prefs
@@ -29,18 +31,32 @@ from bot.utils.coc_time import parse_coc_time
 from bot.utils.navigation import pop_menu, reset_menu, set_menu
 from bot.utils.notify_time import format_duration_ru, parse_delay_to_minutes
 from bot.utils.state import reset_state_if_any
+from bot.utils.tables import build_pre_table
+from bot.utils.war_attacks import build_missed_attacks_table, collect_missed_attacks
+from bot.utils.war_state import find_current_cwl_war, get_missed_attacks_label
+from bot.utils.notification_rules import schedule_rule_for_active_event
 
 logger = logging.getLogger(__name__)
 router = Router()
 
+USERS_PAGE_SIZE = 10
+ADMIN_EVENT_LABELS = {
+    "war": "КВ",
+    "cwl": "ЛВК",
+    "capital": "Рейды",
+}
+
 
 class AdminState(StatesGroup):
     waiting_wipe_target = State()
-    reminder_time_type = State()
-    reminder_delay_value = State()
-    reminder_clock_value = State()
-    reminder_text = State()
-    reminder_confirm = State()
+    rule_choose_type = State()
+    rule_action = State()
+    rule_delay_value = State()
+    rule_text = State()
+    rule_edit_id = State()
+    rule_edit_delay = State()
+    rule_edit_text = State()
+    rule_toggle_delete = State()
 
 
 async def _get_chat_prefs(
@@ -94,11 +110,79 @@ async def _update_chat_pref(
         return prefs
 
 
+def _format_datetime(value: datetime | None, zone: ZoneInfo) -> str:
+    if not value:
+        return "—"
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(zone).strftime("%Y-%m-%d %H:%M")
+
+
+def _rules_table(rows: list[models.NotificationRule]) -> str:
+    table_rows: list[list[str]] = []
+    for rule in rows:
+        status = "ВКЛ" if rule.is_enabled else "ВЫКЛ"
+        delay_text = format_duration_ru(rule.delay_seconds // 60)
+        custom = rule.custom_text or "—"
+        table_rows.append([str(rule.id), delay_text, status, custom])
+    return build_pre_table(
+        ["ID", "Задержка", "Статус", "Текст"],
+        table_rows,
+        max_widths=[5, 10, 6, 24],
+    )
+
+
+def _users_table(
+    users: list[models.User],
+    clan_joined: dict[str, datetime | None],
+    zone: ZoneInfo,
+) -> str:
+    rows: list[list[str]] = []
+    for user in users:
+        tg_name = f"@{user.username}" if user.username else "без username"
+        created_at = _format_datetime(user.created_at, zone)
+        joined_at = clan_joined.get(user.player_tag.upper())
+        if joined_at:
+            joined_text = _format_datetime(joined_at, zone)
+        elif user.first_seen_in_clan_at:
+            joined_text = f"замечен с {_format_datetime(user.first_seen_in_clan_at, zone)}"
+        else:
+            joined_text = "—"
+        rows.append(
+            [
+                user.player_name,
+                tg_name,
+                str(user.telegram_id),
+                created_at,
+                joined_text,
+            ]
+        )
+    return build_pre_table(
+        ["CoC", "Telegram", "ID", "Регистрация", "Клан"],
+        rows,
+        max_widths=[16, 16, 12, 16, 20],
+    )
+
+
+def _users_pagination_kb(page: int, total_pages: int) -> InlineKeyboardMarkup:
+    buttons: list[list[InlineKeyboardButton]] = []
+    nav_row: list[InlineKeyboardButton] = []
+    if page > 1:
+        nav_row.append(InlineKeyboardButton(text="◀️", callback_data=f"admin_users:page:{page - 1}"))
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton(text="▶️", callback_data=f"admin_users:page:{page + 1}"))
+    if nav_row:
+        buttons.append(nav_row)
+    buttons.append([InlineKeyboardButton(text="Назад", callback_data="admin_users:back")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
 async def _handle_admin_escape(
     message: Message,
     state: FSMContext,
     config: BotConfig,
     sessionmaker: async_sessionmaker,
+    coc_client: CocClient,
 ) -> bool:
     if message.text == "Главное меню":
         await reset_state_if_any(state)
@@ -110,7 +194,7 @@ async def _handle_admin_escape(
         return True
     if message.text == "Назад":
         await reset_state_if_any(state)
-        await _show_admin_menu_for_stack(message, state, config, sessionmaker)
+        await _show_admin_menu_for_stack(message, state, config, sessionmaker, coc_client)
         return True
     return False
 
@@ -120,12 +204,14 @@ async def _show_admin_menu_for_stack(
     state: FSMContext,
     config: BotConfig,
     sessionmaker: async_sessionmaker,
+    coc_client: CocClient,
 ) -> None:
     data = await state.get_data()
     stack = list(data.get("menu_stack", []))
     current = stack[-1] if stack else None
     if current == "admin_menu":
-        await message.answer("Админ-панель.", reply_markup=admin_menu_reply())
+        missed_label = await get_missed_attacks_label(coc_client, config.clan_tag)
+        await message.answer("Админ-панель.", reply_markup=admin_menu_reply(missed_label))
         return
     if current == "admin_notify_menu":
         await message.answer("Уведомления: общий чат.", reply_markup=admin_notify_menu_reply())
@@ -203,6 +289,7 @@ async def admin_panel_button(
     message: Message,
     state: FSMContext,
     config: BotConfig,
+    coc_client: CocClient,
 ) -> None:
     await reset_state_if_any(state)
     if not is_admin(message.from_user.id, config):
@@ -213,7 +300,8 @@ async def admin_panel_button(
         return
     await reset_menu(state)
     await set_menu(state, "admin_menu")
-    await message.answer("Админ-панель.", reply_markup=admin_menu_reply())
+    missed_label = await get_missed_attacks_label(coc_client, config.clan_tag)
+    await message.answer("Админ-панель.", reply_markup=admin_menu_reply(missed_label))
 
 
 @router.message(F.text == "Очистить игрока")
@@ -259,12 +347,143 @@ async def diagnostics_button(
     )
 
 
+async def _send_users_page(
+    message: Message,
+    page: int,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+    coc_client: CocClient,
+) -> None:
+    page = max(1, page)
+    async with sessionmaker() as session:
+        total = (await session.execute(select(models.User))).scalars().all()
+        total_count = len(total)
+        users = (
+            await session.execute(
+                select(models.User)
+                .order_by(models.User.created_at.desc())
+                .limit(USERS_PAGE_SIZE)
+                .offset((page - 1) * USERS_PAGE_SIZE)
+            )
+        ).scalars().all()
+    total_pages = max(1, (total_count + USERS_PAGE_SIZE - 1) // USERS_PAGE_SIZE)
+    try:
+        clan_members = await coc_client.get_clan_members(config.clan_tag)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to load clan members: %s", exc)
+        clan_members = {}
+    clan_joined: dict[str, datetime | None] = {}
+    for member in clan_members.get("items", []):
+        tag = (member.get("tag") or "").upper()
+        joined_at = parse_coc_time(member.get("joinedAt"))
+        clan_joined[tag] = joined_at
+    zone = ZoneInfo(config.timezone)
+    table = _users_table(users, clan_joined, zone)
+    await message.answer(
+        f"Пользователи (страница {page}/{total_pages}).\n{table}",
+        reply_markup=_users_pagination_kb(page, total_pages),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@router.message(F.text == "👥 Пользователи")
+async def admin_users_button(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+    coc_client: CocClient,
+) -> None:
+    await reset_state_if_any(state)
+    if not is_admin(message.from_user.id, config):
+        await message.answer(
+            "Админ-панель доступна только администраторам.",
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        )
+        return
+    await _send_users_page(message, 1, config, sessionmaker, coc_client)
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("admin_users:"))
+async def admin_users_page(
+    callback: CallbackQuery,
+    state: FSMContext,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+    coc_client: CocClient,
+) -> None:
+    await callback.answer("Обновляю…")
+    await reset_state_if_any(state)
+    if not is_admin(callback.from_user.id, config):
+        await callback.message.answer("Админ-панель доступна только администраторам.")
+        return
+    payload = callback.data.split(":")[1:]
+    action = payload[0] if payload else ""
+    if action == "back":
+        missed_label = await get_missed_attacks_label(coc_client, config.clan_tag)
+        await callback.message.answer("Админ-панель.", reply_markup=admin_menu_reply(missed_label))
+        return
+    if action == "page" and len(payload) > 1 and payload[1].isdigit():
+        page = int(payload[1])
+        await _send_users_page(callback.message, page, config, sessionmaker, coc_client)
+        return
+
+
+@router.message(F.text.startswith("📋 Кто не атаковал"))
+async def admin_missed_attacks_now(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    coc_client: CocClient,
+) -> None:
+    await reset_state_if_any(state)
+    if not is_admin(message.from_user.id, config):
+        await message.answer(
+            "Админ-панель доступна только администраторам.",
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        )
+        return
+    cwl_war = await find_current_cwl_war(coc_client, config.clan_tag)
+    if cwl_war:
+        missed = collect_missed_attacks(cwl_war)
+        if not missed:
+            await message.answer("Все атаки сделаны.", reply_markup=admin_menu_reply())
+            return
+        table = build_missed_attacks_table(missed)
+        await message.answer(
+            f"ЛВК текущая война: кто не атаковал.\n{table}",
+            reply_markup=admin_menu_reply(),
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    try:
+        war = await coc_client.get_current_war(config.clan_tag)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to load current war: %s", exc)
+        await message.answer("Не удалось получить данные о войне.", reply_markup=admin_menu_reply())
+        return
+    if war.get("state") not in {"preparation", "inWar"}:
+        await message.answer("Сейчас нет активной войны.", reply_markup=admin_menu_reply())
+        return
+    missed = collect_missed_attacks(war)
+    if not missed:
+        await message.answer("Все атаки сделаны.", reply_markup=admin_menu_reply())
+        return
+    table = build_missed_attacks_table(missed)
+    await message.answer(
+        f"КВ сейчас: кто не атаковал.\n{table}",
+        reply_markup=admin_menu_reply(),
+        parse_mode=ParseMode.HTML,
+    )
+
+
 @router.message(F.text == "Назад")
 async def admin_back(
     message: Message,
     state: FSMContext,
     config: BotConfig,
     sessionmaker: async_sessionmaker,
+    coc_client: CocClient,
 ) -> None:
     await reset_state_if_any(state)
     logger.info("Admin back pressed by user_id=%s", message.from_user.id)
@@ -276,7 +495,8 @@ async def admin_back(
         return
     previous = await pop_menu(state)
     if previous == "admin_menu":
-        await message.answer("Админ-панель.", reply_markup=admin_menu_reply())
+        missed_label = await get_missed_attacks_label(coc_client, config.clan_tag)
+        await message.answer("Админ-панель.", reply_markup=admin_menu_reply(missed_label))
         return
     if previous == "admin_notify_menu":
         await message.answer("Уведомления: общий чат.", reply_markup=admin_notify_menu_reply())
@@ -398,13 +618,13 @@ async def admin_notify_toggle(
     )
 
 
-@router.message(
-    F.text.in_({"Создать напоминание КВ", "Создать напоминание ЛВК", "Создать напоминание столицы"})
-)
-async def admin_create_reminder(
+@router.message(F.text == "🔔 Уведомления (чат)")
+async def admin_rules_menu(
     message: Message,
     state: FSMContext,
     config: BotConfig,
+    sessionmaker: async_sessionmaker,
+    coc_client: CocClient,
 ) -> None:
     await reset_state_if_any(state)
     if not is_admin(message.from_user.id, config):
@@ -413,156 +633,326 @@ async def admin_create_reminder(
             reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
         )
         return
-    category_map = {
-        "Создать напоминание КВ": "war",
-        "Создать напоминание ЛВК": "cwl",
-        "Создать напоминание столицы": "capital",
-    }
-    category = category_map.get(message.text)
-    if not category:
-        await message.answer("Не удалось определить тип напоминания.", reply_markup=admin_menu_reply())
+    await state.set_state(AdminState.rule_choose_type)
+    await message.answer("Выберите тип уведомлений.", reply_markup=notify_rules_type_reply())
+
+
+@router.message(AdminState.rule_choose_type)
+async def admin_rules_choose_type(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+    coc_client: CocClient,
+) -> None:
+    if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
         return
-    await state.update_data(reminder_category=category)
-    await state.set_state(AdminState.reminder_time_type)
+    if message.text == "Назад":
+        missed_label = await get_missed_attacks_label(coc_client, config.clan_tag)
+        await message.answer("Админ-панель.", reply_markup=admin_menu_reply(missed_label))
+        await state.clear()
+        return
+    event_type = {"КВ": "war", "ЛВК": "cwl", "Рейды": "capital"}.get(message.text)
+    if not event_type:
+        await message.answer("Нужно выбрать вариант.", reply_markup=notify_rules_type_reply())
+        return
+    await state.update_data(rule_event_type=event_type)
+    await state.set_state(AdminState.rule_action)
     await message.answer(
-        "Когда отправить напоминание?",
-        reply_markup=admin_reminder_type_reply(),
+        f"Управление уведомлениями: {ADMIN_EVENT_LABELS[event_type]}.",
+        reply_markup=notify_rules_action_reply(),
     )
 
 
-@router.message(AdminState.reminder_time_type)
-async def admin_reminder_time_type(
+@router.message(AdminState.rule_action)
+async def admin_rules_action(
     message: Message,
     state: FSMContext,
     config: BotConfig,
     sessionmaker: async_sessionmaker,
+    coc_client: CocClient,
 ) -> None:
-    if not is_admin(message.from_user.id, config):
+    if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
+        return
+    if message.text == "Назад":
+        await state.set_state(AdminState.rule_choose_type)
+        await message.answer("Выберите тип уведомлений.", reply_markup=notify_rules_type_reply())
+        return
+    data = await state.get_data()
+    event_type = data.get("rule_event_type")
+    if event_type not in {"war", "cwl", "capital"}:
+        await state.clear()
+        missed_label = await get_missed_attacks_label(coc_client, config.clan_tag)
+        await message.answer("Админ-панель.", reply_markup=admin_menu_reply(missed_label))
+        return
+    if message.text == "➕ Добавить уведомление":
+        await state.set_state(AdminState.rule_delay_value)
         await message.answer(
-            "Админ-панель доступна только администраторам.",
-            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+            "Введите задержку от старта события (например, 1h, 30m, 0.1h).",
+            reply_markup=notify_rules_action_reply(),
         )
         return
-    if await _handle_admin_escape(message, state, config, sessionmaker):
-        return
-    text = (message.text or "").strip().lower()
-    if text.startswith("через"):
-        await state.update_data(reminder_mode="delay")
-        await state.set_state(AdminState.reminder_delay_value)
+    if message.text == "📋 Активные уведомления":
+        async with sessionmaker() as session:
+            rules = (
+                await session.execute(
+                    select(models.NotificationRule)
+                    .where(models.NotificationRule.chat_id == config.main_chat_id)
+                    .where(models.NotificationRule.event_type == event_type)
+                    .order_by(models.NotificationRule.created_at.desc())
+                )
+            ).scalars().all()
+        if not rules:
+            await message.answer("Активных уведомлений нет.", reply_markup=notify_rules_action_reply())
+            return
         await message.answer(
-            "Введите время от старта события (например, 22h для 22 часов или 30m для 30 минут).",
-            reply_markup=admin_action_reply(),
+            f"Уведомления: {ADMIN_EVENT_LABELS[event_type]}.\n{_rules_table(rules)}",
+            reply_markup=notify_rules_action_reply(),
+            parse_mode=ParseMode.HTML,
         )
         return
-    if text.startswith("время"):
-        await state.update_data(reminder_mode="clock")
-        await state.set_state(AdminState.reminder_clock_value)
-        await message.answer("Введите время HH:MM (например, 19:30).", reply_markup=admin_action_reply())
+    if message.text == "✏️ Изменить уведомление":
+        await state.set_state(AdminState.rule_edit_id)
+        await message.answer("Введите ID уведомления для изменения.", reply_markup=notify_rules_action_reply())
         return
-    await message.answer("Нужно выбрать вариант.", reply_markup=admin_reminder_type_reply())
+    if message.text == "🗑 Удалить / Отключить уведомление":
+        await state.set_state(AdminState.rule_toggle_delete)
+        await message.answer(
+            "Введите ID и действие: включить, отключить или удалить. Пример: 12 отключить.",
+            reply_markup=notify_rules_action_reply(),
+        )
+        return
+    await message.answer("Нужно выбрать действие.", reply_markup=notify_rules_action_reply())
 
 
-@router.message(AdminState.reminder_delay_value)
-async def admin_reminder_delay_value(
+@router.message(AdminState.rule_delay_value)
+async def admin_rule_delay_value(
     message: Message,
     state: FSMContext,
     config: BotConfig,
     sessionmaker: async_sessionmaker,
+    coc_client: CocClient,
 ) -> None:
-    if not is_admin(message.from_user.id, config):
-        await message.answer(
-            "Админ-панель доступна только администраторам.",
-            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
-        )
+    if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
         return
-    if await _handle_admin_escape(message, state, config, sessionmaker):
+    if message.text == "Назад":
+        await state.set_state(AdminState.rule_action)
+        await message.answer("Выберите действие.", reply_markup=notify_rules_action_reply())
         return
     delay_minutes = parse_delay_to_minutes(message.text or "")
     if not delay_minutes:
-        await message.answer(
-            "Введите время в формате 22h или 30m.",
-            reply_markup=admin_action_reply(),
-        )
+        await message.answer("Нужен формат 1h, 30m или 0.1h.", reply_markup=notify_rules_action_reply())
         return
-    await state.update_data(reminder_value=delay_minutes)
-    await state.set_state(AdminState.reminder_text)
-    await message.answer(
-        "Введите короткое описание напоминания или '-' чтобы оставить только шаблон.",
-        reply_markup=admin_action_reply(),
-    )
+    await state.update_data(rule_delay_minutes=delay_minutes)
+    await state.set_state(AdminState.rule_text)
+    await message.answer("Введите текст уведомления или '-' без текста.", reply_markup=notify_rules_action_reply())
 
 
-@router.message(AdminState.reminder_clock_value)
-async def admin_reminder_clock_value(
+@router.message(AdminState.rule_text)
+async def admin_rule_text(
     message: Message,
     state: FSMContext,
     config: BotConfig,
     sessionmaker: async_sessionmaker,
+    coc_client: CocClient,
 ) -> None:
-    if not is_admin(message.from_user.id, config):
-        await message.answer(
-            "Админ-панель доступна только администраторам.",
-            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
-        )
+    if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
         return
-    if await _handle_admin_escape(message, state, config, sessionmaker):
+    if message.text == "Назад":
+        await state.set_state(AdminState.rule_action)
+        await message.answer("Выберите действие.", reply_markup=notify_rules_action_reply())
         return
-    text = (message.text or "").strip()
-    if len(text.split(":")) != 2:
-        await message.answer("Нужно время в формате HH:MM.", reply_markup=admin_action_reply())
-        return
-    hours, minutes = text.split(":", 1)
-    if not hours.isdigit() or not minutes.isdigit():
-        await message.answer("Нужно время в формате HH:MM.", reply_markup=admin_action_reply())
-        return
-    hour = int(hours)
-    minute = int(minutes)
-    if hour not in range(0, 24) or minute not in range(0, 60):
-        await message.answer("Часы 0-23, минуты 0-59.", reply_markup=admin_action_reply())
-        return
-    await state.update_data(reminder_value=f"{hour:02d}:{minute:02d}")
-    await state.set_state(AdminState.reminder_text)
-    await message.answer(
-        "Введите короткое описание напоминания или '-' чтобы оставить только шаблон.",
-        reply_markup=admin_action_reply(),
-    )
-
-
-@router.message(AdminState.reminder_text)
-async def admin_reminder_text(
-    message: Message,
-    state: FSMContext,
-    config: BotConfig,
-    sessionmaker: async_sessionmaker,
-) -> None:
-    if not is_admin(message.from_user.id, config):
-        await message.answer(
-            "Админ-панель доступна только администраторам.",
-            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
-        )
-        return
-    if await _handle_admin_escape(message, state, config, sessionmaker):
-        return
-    text = (message.text or "").strip()
-    if not text:
-        await message.answer("Нужно описание или '-'.", reply_markup=admin_action_reply())
-        return
-    reminder_text = "" if text == "-" else text
-    await state.update_data(reminder_text=reminder_text)
-    await state.set_state(AdminState.reminder_confirm)
     data = await state.get_data()
+    event_type = data.get("rule_event_type")
+    delay_minutes = data.get("rule_delay_minutes")
+    if event_type not in {"war", "cwl", "capital"} or not delay_minutes:
+        await state.clear()
+        missed_label = await get_missed_attacks_label(coc_client, config.clan_tag)
+        await message.answer("Админ-панель.", reply_markup=admin_menu_reply(missed_label))
+        return
+    text = (message.text or "").strip()
+    custom_text = "" if text == "-" else text
+    async with sessionmaker() as session:
+        rule = models.NotificationRule(
+            scope="chat",
+            chat_id=config.main_chat_id,
+            event_type=event_type,
+            delay_seconds=int(delay_minutes * 60),
+            custom_text=custom_text,
+            is_enabled=True,
+        )
+        session.add(rule)
+        await session.flush()
+        await schedule_rule_for_active_event(session, coc_client, config, rule)
+        await session.commit()
+    await state.set_state(AdminState.rule_action)
     await message.answer(
-        f"Подтверждение:\n"
-        f"Тип: {'через N часов' if data.get('reminder_mode') == 'delay' else 'время'}\n"
-        f"Значение: {format_duration_ru(data.get('reminder_value')) if data.get('reminder_mode') == 'delay' else data.get('reminder_value')}\n"
-        f"Текст: {reminder_text or 'без текста'}\n"
-        "Напишите 'да' для подтверждения.",
-        reply_markup=admin_action_reply(),
+        f"Уведомление добавлено: через {format_duration_ru(delay_minutes)}.",
+        reply_markup=notify_rules_action_reply(),
     )
 
 
-@router.message(AdminState.reminder_confirm)
-async def admin_reminder_confirm(
+@router.message(AdminState.rule_edit_id)
+async def admin_rule_edit_id(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+    coc_client: CocClient,
+) -> None:
+    if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
+        return
+    if message.text == "Назад":
+        await state.set_state(AdminState.rule_action)
+        await message.answer("Выберите действие.", reply_markup=notify_rules_action_reply())
+        return
+    if not (message.text or "").isdigit():
+        await message.answer("Нужен числовой ID.", reply_markup=notify_rules_action_reply())
+        return
+    await state.update_data(rule_edit_id=int(message.text))
+    await state.set_state(AdminState.rule_edit_delay)
+    await message.answer(
+        "Введите новую задержку (1h, 30m) или '-' чтобы оставить.",
+        reply_markup=notify_rules_action_reply(),
+    )
+
+
+@router.message(AdminState.rule_edit_delay)
+async def admin_rule_edit_delay(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+    coc_client: CocClient,
+) -> None:
+    if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
+        return
+    if message.text == "Назад":
+        await state.set_state(AdminState.rule_action)
+        await message.answer("Выберите действие.", reply_markup=notify_rules_action_reply())
+        return
+    text = (message.text or "").strip()
+    delay_minutes = None
+    if text != "-":
+        delay_minutes = parse_delay_to_minutes(text)
+        if not delay_minutes:
+            await message.answer("Нужен формат 1h, 30m или '-'.", reply_markup=notify_rules_action_reply())
+            return
+    await state.update_data(rule_edit_delay=delay_minutes)
+    await state.set_state(AdminState.rule_edit_text)
+    await message.answer("Введите новый текст или '-' чтобы оставить.", reply_markup=notify_rules_action_reply())
+
+
+@router.message(AdminState.rule_edit_text)
+async def admin_rule_edit_text(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+    coc_client: CocClient,
+) -> None:
+    if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
+        return
+    if message.text == "Назад":
+        await state.set_state(AdminState.rule_action)
+        await message.answer("Выберите действие.", reply_markup=notify_rules_action_reply())
+        return
+    data = await state.get_data()
+    event_type = data.get("rule_event_type")
+    rule_id = data.get("rule_edit_id")
+    if event_type not in {"war", "cwl", "capital"} or not rule_id:
+        await state.clear()
+        missed_label = await get_missed_attacks_label(coc_client, config.clan_tag)
+        await message.answer("Админ-панель.", reply_markup=admin_menu_reply(missed_label))
+        return
+    new_delay = data.get("rule_edit_delay")
+    text_input = (message.text or "").strip()
+    custom_text = None if text_input == "-" else text_input
+    async with sessionmaker() as session:
+        rule = (
+            await session.execute(
+                select(models.NotificationRule)
+                .where(models.NotificationRule.id == rule_id)
+                .where(models.NotificationRule.chat_id == config.main_chat_id)
+                .where(models.NotificationRule.event_type == event_type)
+            )
+        ).scalar_one_or_none()
+        if not rule:
+            await message.answer("Уведомление не найдено.", reply_markup=notify_rules_action_reply())
+            await state.set_state(AdminState.rule_action)
+            return
+        if new_delay is not None:
+            rule.delay_seconds = int(new_delay * 60)
+        if custom_text is not None:
+            rule.custom_text = custom_text
+        await session.commit()
+    await state.set_state(AdminState.rule_action)
+    await message.answer("Уведомление обновлено.", reply_markup=notify_rules_action_reply())
+
+
+@router.message(AdminState.rule_toggle_delete)
+async def admin_rule_toggle_delete(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+    coc_client: CocClient,
+) -> None:
+    if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
+        return
+    if message.text == "Назад":
+        await state.set_state(AdminState.rule_action)
+        await message.answer("Выберите действие.", reply_markup=notify_rules_action_reply())
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2 or not parts[0].isdigit():
+        await message.answer(
+            "Нужен формат: ID действие (включить/отключить/удалить).",
+            reply_markup=notify_rules_action_reply(),
+        )
+        return
+    rule_id = int(parts[0])
+    action = parts[1].lower()
+    data = await state.get_data()
+    event_type = data.get("rule_event_type")
+    if event_type not in {"war", "cwl", "capital"}:
+        await state.clear()
+        missed_label = await get_missed_attacks_label(coc_client, config.clan_tag)
+        await message.answer("Админ-панель.", reply_markup=admin_menu_reply(missed_label))
+        return
+    async with sessionmaker() as session:
+        rule = (
+            await session.execute(
+                select(models.NotificationRule)
+                .where(models.NotificationRule.id == rule_id)
+                .where(models.NotificationRule.chat_id == config.main_chat_id)
+                .where(models.NotificationRule.event_type == event_type)
+            )
+        ).scalar_one_or_none()
+        if not rule:
+            await message.answer("Уведомление не найдено.", reply_markup=notify_rules_action_reply())
+            return
+        if action.startswith("удал"):
+            await session.delete(rule)
+            await session.commit()
+            await message.answer("Уведомление удалено.", reply_markup=notify_rules_action_reply())
+            return
+        if action.startswith("откл"):
+            rule.is_enabled = False
+        elif action.startswith("вкл"):
+            rule.is_enabled = True
+        else:
+            await message.answer(
+                "Действие: включить, отключить или удалить.",
+                reply_markup=notify_rules_action_reply(),
+            )
+            return
+        await session.commit()
+    await message.answer("Готово.", reply_markup=notify_rules_action_reply())
+
+
+@router.message(AdminState.waiting_wipe_target)
+async def wipe_target(
     message: Message,
     state: FSMContext,
     config: BotConfig,
@@ -575,146 +965,7 @@ async def admin_reminder_confirm(
             reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
         )
         return
-    if await _handle_admin_escape(message, state, config, sessionmaker):
-        return
-    if (message.text or "").strip().lower() not in {"да", "yes", "ок", "ok"}:
-        await state.clear()
-        await message.answer("Отмена.", reply_markup=admin_menu_reply())
-        return
-    data = await state.get_data()
-    category = data.get("reminder_category")
-    if category not in {"war", "cwl", "capital"}:
-        await state.clear()
-        await message.answer("Не удалось определить раздел напоминания.", reply_markup=admin_menu_reply())
-        return
-
-    context: dict = {}
-    start_at: datetime | None = None
-    if category == "war":
-        try:
-            war_data = await coc_client.get_current_war(config.clan_tag)
-        except Exception as exc:  # noqa: BLE001
-            await state.clear()
-            await message.answer(
-                f"Не удалось получить данные о войне: {exc}",
-                reply_markup=admin_menu_reply(),
-            )
-            return
-        if war_data.get("state") not in {"preparation", "inWar"}:
-            await state.clear()
-            await message.answer("Сейчас нет активной войны.", reply_markup=admin_menu_reply())
-            return
-        war_tag = war_data.get("tag") or war_data.get("clan", {}).get("tag")
-        context = {"war_tag": war_tag}
-        start_at = parse_coc_time(war_data.get("startTime"))
-        event_type = "war_reminder"
-    elif category == "cwl":
-        try:
-            league = await coc_client.get_league_group(config.clan_tag)
-        except Exception as exc:  # noqa: BLE001
-            await state.clear()
-            await message.answer(
-                f"Не удалось получить данные ЛВК: {exc}",
-                reply_markup=admin_menu_reply(),
-            )
-            return
-        war_tag = None
-        war_data = None
-        for round_item in league.get("rounds", []):
-            for tag in round_item.get("warTags", []):
-                if tag and tag != "#0":
-                    try:
-                        war_data = await coc_client.get_cwl_war(tag)
-                    except Exception:  # noqa: BLE001
-                        continue
-                    if war_data and war_data.get("state") in {"preparation", "inWar"}:
-                        war_tag = tag
-                        break
-            if war_tag:
-                break
-        if not war_tag or not war_data:
-            await state.clear()
-            await message.answer("Нет активного раунда ЛВК.", reply_markup=admin_menu_reply())
-            return
-        context = {"cwl_war_tag": war_tag, "season": league.get("season")}
-        start_at = parse_coc_time(war_data.get("startTime"))
-        event_type = "cwl_reminder"
-    else:
-        try:
-            raids = await coc_client.get_capital_raid_seasons(config.clan_tag)
-        except Exception as exc:  # noqa: BLE001
-            await state.clear()
-            await message.answer(
-                f"Не удалось получить рейды столицы: {exc}",
-                reply_markup=admin_menu_reply(),
-            )
-            return
-        items = raids.get("items", [])
-        if not items:
-            await state.clear()
-            await message.answer("Нет данных о рейдах.", reply_markup=admin_menu_reply())
-            return
-        latest = items[0]
-        raid_id = latest.get("startTime") or latest.get("endTime") or "raid"
-        start_at = parse_coc_time(latest.get("startTime"))
-        end_at = parse_coc_time(latest.get("endTime"))
-        now = datetime.now(timezone.utc)
-        if not start_at or not end_at or not (start_at <= now <= end_at):
-            await state.clear()
-            await message.answer("Сейчас нет активного рейд-уикенда.", reply_markup=admin_menu_reply())
-            return
-        context = {"raid_id": raid_id}
-        event_type = "capital_reminder"
-
-    if data.get("reminder_mode") == "delay":
-        base_time = start_at or datetime.now(timezone.utc)
-        delay_minutes = int(data["reminder_value"])
-        context["delay_minutes"] = delay_minutes
-        context["scope"] = "chat"
-        fire_at = base_time + timedelta(minutes=delay_minutes)
-    else:
-        zone = ZoneInfo(config.timezone)
-        now = datetime.now(zone)
-        clock_value = data["reminder_value"]
-        hour, minute = [int(x) for x in clock_value.split(":")]
-        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if target <= now:
-            target = target + timedelta(days=1)
-        fire_at = target.astimezone(timezone.utc)
-        context["scope"] = "chat"
-
-    async with sessionmaker() as session:
-        session.add(
-            models.ScheduledNotification(
-                category=category,
-                event_type=event_type,
-                fire_at=fire_at,
-                message_text=data.get("reminder_text"),
-                created_by=message.from_user.id,
-                status="pending",
-                context=context,
-            )
-        )
-        await session.commit()
-
-    await state.clear()
-    await message.answer("Напоминание сохранено.", reply_markup=admin_menu_reply())
-
-
-@router.message(AdminState.waiting_wipe_target)
-async def wipe_target(
-    message: Message,
-    state: FSMContext,
-    config: BotConfig,
-    sessionmaker: async_sessionmaker,
-) -> None:
-    if not is_admin(message.from_user.id, config):
-        await message.answer(
-            "Админ-панель доступна только администраторам.",
-            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
-        )
-        return
-    if await _handle_admin_escape(message, state, config, sessionmaker):
+    if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
         return
 
     target_user = message.reply_to_message.from_user if message.reply_to_message else None

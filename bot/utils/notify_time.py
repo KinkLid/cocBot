@@ -4,17 +4,21 @@ import re
 
 
 def parse_delay_to_minutes(text: str) -> int | None:
-    cleaned = text.strip().lower()
-    match = re.fullmatch(r"(\d+)\s*([hm])?", cleaned)
+    cleaned = text.strip().lower().replace(",", ".")
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([hm])?", cleaned)
     if not match:
         return None
-    value = int(match.group(1))
+    value = float(match.group(1))
     if value <= 0:
         return None
     unit = match.group(2)
     if unit == "m":
-        return value
-    return value * 60
+        minutes = int(round(value))
+    else:
+        minutes = int(round(value * 60))
+    if minutes <= 0:
+        return None
+    return minutes
 
 
 def format_duration_ru(total_minutes: int) -> str:
