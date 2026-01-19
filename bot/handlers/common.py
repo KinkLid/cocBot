@@ -24,6 +24,7 @@ from bot.services.coc_client import CocClient
 from bot.services.permissions import is_admin
 from bot.texts.help import build_help_text
 from bot.texts.rules import build_rules_text
+from bot.ui.labels import label, label_variants, menu_text_actions
 from bot.utils.navigation import reset_menu, set_menu
 from bot.utils.war_state import get_missed_attacks_label
 from bot.utils.state import reset_state_if_any
@@ -32,22 +33,7 @@ from bot.utils.telegram import build_bot_dm_keyboard, build_bot_dm_link, try_sen
 router = Router()
 logger = logging.getLogger(__name__)
 
-MENU_TEXT_ACTIONS = {
-    "Регистрация": "register",
-    "Мой профиль": "profile",
-    "Моя статистика": "mystats",
-    "🔔 Уведомления": "notify",
-    "Уведомления": "notify",
-    "Цели на войне": "targets",
-    "📜 Правила клана": "rules",
-    "Правила клана": "rules",
-    "📣 Жалоба": "complaint",
-    "Жалоба": "complaint",
-    "Помощь / Гайд": "guide",
-    "Помощь гайд": "guide",
-    "Админ-панель": "admin",
-    "Админ панель": "admin",
-}
+MENU_TEXT_ACTIONS = menu_text_actions()
 
 
 @router.message(CommandStart())
@@ -68,7 +54,7 @@ async def start_command(
     if message.chat.type == ChatType.PRIVATE:
         invite_text = await _maybe_build_invite_text(message, sessionmaker, config)
     await message.answer(
-        "Привет! Это бот клана Clash of Clans. Нажмите «Регистрация», чтобы начать."
+        f"Привет! Это бот клана Clash of Clans. Нажмите «{label('register')}», чтобы начать."
         f"{invite_text}",
         reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
     )
@@ -136,7 +122,7 @@ async def me_command(
     logger.debug("profile lookup telegram_id=%s found=%s", message.from_user.id, bool(user))
     if not user:
         await message.answer(
-            "Вы ещё не зарегистрированы. Нажмите «Регистрация».",
+            f"Вы ещё не зарегистрированы. Нажмите «{label('register')}».",
             reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
         )
         return
@@ -234,7 +220,7 @@ async def rules_command(
     )
 
 
-@router.message(F.text == "Помощь / Гайд")
+@router.message(F.text.in_(label_variants("guide")))
 async def help_button(
     message: Message,
     state: FSMContext,
@@ -299,7 +285,7 @@ async def group_menu_router(
         sent = await try_send_dm(
             message.bot,
             message.from_user.id,
-            "Чтобы подать жалобу, откройте ЛС и нажмите «📣 Жалоба».",
+            f"Чтобы подать жалобу, откройте ЛС и нажмите «{label('complaint')}».",
             reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
         )
         if sent:
@@ -342,7 +328,7 @@ async def group_menu_router(
         await message.answer("Админ-панель.", reply_markup=admin_menu_reply(missed_label))
 
 
-@router.message(F.text == "📜 Правила клана")
+@router.message(F.text.in_(label_variants("rules")))
 async def rules_button(message: Message, state: FSMContext, config: BotConfig) -> None:
     await rules_command(message, state, config)
 
@@ -357,7 +343,7 @@ async def profile_command(
     await me_command(message, state, config, sessionmaker)
 
 
-@router.message(F.text == "Мой профиль")
+@router.message(F.text.in_(label_variants("profile")))
 async def profile_button(
     message: Message,
     state: FSMContext,
@@ -367,7 +353,7 @@ async def profile_button(
     await me_command(message, state, config, sessionmaker)
 
 
-@router.message(F.text == "Показать профиль")
+@router.message(F.text.in_(label_variants("show_profile")))
 async def show_profile_button(
     message: Message,
     state: FSMContext,
@@ -377,7 +363,7 @@ async def show_profile_button(
     await me_command(message, state, config, sessionmaker)
 
 
-@router.message(F.text == "Главное меню")
+@router.message(F.text.in_(label_variants("main_menu")))
 async def main_menu_button(message: Message, state: FSMContext, config: BotConfig) -> None:
     await reset_state_if_any(state)
     await reset_menu(state)
@@ -406,9 +392,9 @@ async def menu_callbacks(
         logger.debug("profile lookup telegram_id=%s found=%s", callback.from_user.id, bool(user))
         if not user:
             await callback.message.answer(
-                "Вы ещё не зарегистрированы. Нажмите «Регистрация».",
-                reply_markup=main_menu_reply(is_admin(callback.from_user.id, config)),
-            )
+            f"Вы ещё не зарегистрированы. Нажмите «{label('register')}».",
+            reply_markup=main_menu_reply(is_admin(callback.from_user.id, config)),
+        )
             return
         await callback.message.answer(
             f"Профиль: {user.player_name} ({user.player_tag})\nКлан: {user.clan_tag}",

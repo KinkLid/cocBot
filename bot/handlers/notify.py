@@ -22,6 +22,7 @@ from bot.services.permissions import is_admin
 from bot.services.coc_client import CocClient
 from bot.services.hints import send_hint_once
 from bot.texts.hints import NOTIFY_HINT
+from bot.ui.labels import is_back, is_main_menu, label, label_variants
 from bot.utils.navigation import pop_menu, reset_menu, set_menu
 from bot.utils.notify_time import format_duration_ru, parse_delay_to_minutes
 from bot.utils.state import reset_state_if_any
@@ -84,7 +85,7 @@ async def _get_user_or_prompt(
         ).scalar_one_or_none()
     if not user:
         await message.answer(
-            "Вы ещё не зарегистрированы. Нажмите «Регистрация».",
+            f"Вы ещё не зарегистрированы. Нажмите «{label('register')}».",
             reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
         )
     return user
@@ -109,7 +110,7 @@ async def _handle_user_menu_escape(
     state: FSMContext,
     config: BotConfig,
 ) -> bool:
-    if message.text == "Главное меню":
+    if is_main_menu(message.text):
         await reset_state_if_any(state)
         await reset_menu(state)
         await message.answer(
@@ -137,7 +138,7 @@ async def notify_command(
         ).scalar_one_or_none()
         if not user:
             await message.answer(
-                "Вы ещё не зарегистрированы. Нажмите «Регистрация».",
+                f"Вы ещё не зарегистрированы. Нажмите «{label('register')}».",
                 reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
             )
             return
@@ -170,7 +171,7 @@ async def send_notify_menu(
         if not user:
             await bot.send_message(
                 chat_id=chat_id,
-                text="Вы ещё не зарегистрированы. Нажмите «Регистрация».",
+                text=f"Вы ещё не зарегистрированы. Нажмите «{label('register')}».",
                 reply_markup=main_menu_reply(is_admin(user_id, config)),
             )
             return
@@ -183,7 +184,7 @@ async def send_notify_menu(
     )
 
 
-@router.message(F.text == "🔔 Уведомления")
+@router.message(F.text.in_(label_variants("notify")))
 async def notify_button(
     message: Message,
     state: FSMContext,
@@ -194,7 +195,10 @@ async def notify_button(
 
 
 @router.message(
-    F.text.startswith("🟢 Личные уведомления") | F.text.startswith("🔴 Личные уведомления")
+    F.text.startswith("✅ ЛС уведомления")
+    | F.text.startswith("🔴 ЛС уведомления")
+    | F.text.startswith("🟢 Личные уведомления")
+    | F.text.startswith("🔴 Личные уведомления")
 )
 async def notify_toggle_dm_button(
     message: Message,
@@ -211,7 +215,7 @@ async def notify_toggle_dm_button(
         ).scalar_one_or_none()
         if not user:
             await message.answer(
-                "Вы ещё не зарегистрированы. Нажмите «Регистрация».",
+                f"Вы ещё не зарегистрированы. Нажмите «{label('register')}».",
                 reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
             )
             return
@@ -256,10 +260,13 @@ async def notify_toggle_dm_button(
 
 @router.message(
     F.text.startswith("✅ КВ уведомления")
-    | F.text.startswith("☑️ КВ уведомления")
+    | F.text.startswith("🔴 КВ уведомления")
     | F.text.startswith("✅ ЛВК уведомления")
-    | F.text.startswith("☑️ ЛВК уведомления")
+    | F.text.startswith("🔴 ЛВК уведомления")
     | F.text.startswith("✅ Рейды уведомления")
+    | F.text.startswith("🔴 Рейды уведомления")
+    | F.text.startswith("☑️ КВ уведомления")
+    | F.text.startswith("☑️ ЛВК уведомления")
     | F.text.startswith("☑️ Рейды уведомления")
 )
 async def notify_category_toggle(
@@ -288,7 +295,7 @@ async def notify_category_toggle(
         ).scalar_one_or_none()
         if not user:
             await message.answer(
-                "Вы ещё не зарегистрированы. Нажмите «Регистрация».",
+                f"Вы ещё не зарегистрированы. Нажмите «{label('register')}».",
                 reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
             )
             return
@@ -307,7 +314,7 @@ async def notify_category_toggle(
     )
 
 
-@router.message(F.text == "Назад к уведомлениям")
+@router.message(F.text.in_(label_variants("notify_back")))
 async def notify_back(
     message: Message,
     state: FSMContext,
@@ -319,7 +326,7 @@ async def notify_back(
     await notify_command(message, state, config, sessionmaker)
 
 
-@router.message(F.text.startswith("Режим ЛС:"))
+@router.message(F.text.startswith("🕒 Режим ЛС:") | F.text.startswith("Режим ЛС:"))
 async def notify_dm_window_toggle(
     message: Message,
     state: FSMContext,
@@ -333,7 +340,7 @@ async def notify_dm_window_toggle(
         ).scalar_one_or_none()
         if not user:
             await message.answer(
-                "Вы ещё не зарегистрированы. Нажмите «Регистрация».",
+                f"Вы ещё не зарегистрированы. Нажмите «{label('register')}».",
                 reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
             )
             return
@@ -351,7 +358,7 @@ async def notify_dm_window_toggle(
     )
 
 
-@router.message(F.text == "🔔 Личные уведомления")
+@router.message(F.text.in_(label_variants("notify_personal")))
 async def notify_rules_menu(
     message: Message,
     state: FSMContext,
@@ -385,10 +392,18 @@ async def notify_rules_choose_type(
 ) -> None:
     if await _handle_user_menu_escape(message, state, config):
         return
-    if message.text == "Назад":
+    if is_back(message.text):
         await notify_command(message, state, config, sessionmaker)
         return
-    event_type = {"КВ": "war", "ЛВК": "cwl", "Рейды": "capital"}.get(message.text)
+    event_type_map: dict[str, str] = {}
+    for key, value in {
+        "notify_type_war": "war",
+        "notify_type_cwl": "cwl",
+        "notify_type_capital": "capital",
+    }.items():
+        for variant in label_variants(key):
+            event_type_map[variant] = value
+    event_type = event_type_map.get(message.text or "")
     if not event_type:
         await message.answer("Нужно выбрать вариант.", reply_markup=notify_rules_type_reply())
         return
@@ -409,7 +424,7 @@ async def notify_rules_action(
 ) -> None:
     if await _handle_user_menu_escape(message, state, config):
         return
-    if message.text == "Назад":
+    if is_back(message.text):
         await state.set_state(NotifyState.rule_choose_type)
         await message.answer("Выберите тип уведомлений.", reply_markup=notify_rules_type_reply())
         return
@@ -419,14 +434,14 @@ async def notify_rules_action(
         await state.clear()
         await notify_command(message, state, config, sessionmaker)
         return
-    if message.text == "➕ Добавить уведомление":
+    if message.text in label_variants("notify_add"):
         await state.set_state(NotifyState.rule_delay_value)
         await message.answer(
             "Введите задержку от старта события (например, 1h, 30m, 0.1h).",
             reply_markup=notify_rules_action_reply(),
         )
         return
-    if message.text == "📋 Активные уведомления":
+    if message.text in label_variants("notify_list"):
         async with sessionmaker() as session:
             rules = (
                 await session.execute(
@@ -445,11 +460,11 @@ async def notify_rules_action(
             parse_mode=ParseMode.HTML,
         )
         return
-    if message.text == "✏️ Изменить уведомление":
+    if message.text in label_variants("notify_edit"):
         await state.set_state(NotifyState.rule_edit_id)
         await message.answer("Введите ID уведомления для изменения.", reply_markup=notify_rules_action_reply())
         return
-    if message.text == "🗑 Удалить / Отключить уведомление":
+    if message.text in label_variants("notify_delete"):
         await state.set_state(NotifyState.rule_toggle_delete)
         await message.answer(
             "Введите ID и действие: включить, отключить или удалить. Пример: 12 отключить.",
@@ -468,7 +483,7 @@ async def notify_rule_delay_value(
 ) -> None:
     if await _handle_user_menu_escape(message, state, config):
         return
-    if message.text == "Назад":
+    if is_back(message.text):
         await state.set_state(NotifyState.rule_action)
         await message.answer("Выберите действие.", reply_markup=notify_rules_action_reply())
         return
@@ -491,7 +506,7 @@ async def notify_rule_text(
 ) -> None:
     if await _handle_user_menu_escape(message, state, config):
         return
-    if message.text == "Назад":
+    if is_back(message.text):
         await state.set_state(NotifyState.rule_action)
         await message.answer("Выберите действие.", reply_markup=notify_rules_action_reply())
         return
@@ -533,7 +548,7 @@ async def notify_rule_edit_id(
 ) -> None:
     if await _handle_user_menu_escape(message, state, config):
         return
-    if message.text == "Назад":
+    if is_back(message.text):
         await state.set_state(NotifyState.rule_action)
         await message.answer("Выберите действие.", reply_markup=notify_rules_action_reply())
         return
@@ -557,7 +572,7 @@ async def notify_rule_edit_delay(
 ) -> None:
     if await _handle_user_menu_escape(message, state, config):
         return
-    if message.text == "Назад":
+    if is_back(message.text):
         await state.set_state(NotifyState.rule_action)
         await message.answer("Выберите действие.", reply_markup=notify_rules_action_reply())
         return
@@ -585,7 +600,7 @@ async def notify_rule_edit_text(
 ) -> None:
     if await _handle_user_menu_escape(message, state, config):
         return
-    if message.text == "Назад":
+    if is_back(message.text):
         await state.set_state(NotifyState.rule_action)
         await message.answer("Выберите действие.", reply_markup=notify_rules_action_reply())
         return
@@ -630,7 +645,7 @@ async def notify_rule_toggle_delete(
 ) -> None:
     if await _handle_user_menu_escape(message, state, config):
         return
-    if message.text == "Назад":
+    if is_back(message.text):
         await state.set_state(NotifyState.rule_action)
         await message.answer("Выберите действие.", reply_markup=notify_rules_action_reply())
         return

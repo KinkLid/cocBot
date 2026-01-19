@@ -19,6 +19,7 @@ from bot.keyboards.hints import hint_ack_kb
 from bot.services.coc_client import CocClient
 from bot.services.permissions import is_admin
 from bot.texts.hints import REGISTER_HINT
+from bot.ui.labels import is_main_menu, label, label_variants
 from bot.utils.navigation import reset_menu
 from bot.utils.state import reset_state_if_any
 from bot.utils.tokens import hash_token
@@ -76,7 +77,7 @@ async def _reject_if_registered(
         reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
     )
     await message.answer(
-        "Повторная регистрация запрещена. Нажмите «Показать профиль» или «Главное меню».",
+        f"Повторная регистрация запрещена. Нажмите «{label('show_profile')}» или «{label('main_menu')}».",
         reply_markup=registration_reply(),
     )
     return True
@@ -114,7 +115,7 @@ async def register_command(
     await start_registration(message, state, bot_username, config, sessionmaker)
 
 
-@router.message(F.text == "Регистрация")
+@router.message(F.text.in_(label_variants("register")))
 async def register_button(
     message: Message,
     state: FSMContext,
@@ -127,7 +128,7 @@ async def register_button(
 
 @router.message(RegisterState.waiting_tag)
 async def register_tag(message: Message, state: FSMContext, config: BotConfig) -> None:
-    if message.text == "Главное меню":
+    if is_main_menu(message.text):
         await state.clear()
         await reset_menu(state)
         await message.answer(
@@ -158,7 +159,7 @@ async def register_token(
     coc_client: CocClient,
     sessionmaker: async_sessionmaker,
 ) -> None:
-    if message.text == "Главное меню":
+    if is_main_menu(message.text):
         await state.clear()
         await reset_menu(state)
         await message.answer(
@@ -172,7 +173,7 @@ async def register_token(
     if not player_tag:
         await state.clear()
         await message.answer(
-            "Что-то пошло не так. Нажмите «Регистрация» ещё раз.",
+            f"Что-то пошло не так. Нажмите «{label('register')}» ещё раз.",
             reply_markup=registration_reply(),
         )
         return

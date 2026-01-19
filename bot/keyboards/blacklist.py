@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from bot.ui.labels import label, member_label
+
 
 def blacklist_members_kb(
     members: list[dict],
@@ -16,7 +18,7 @@ def blacklist_members_kb(
         name = member.get("name", "Игрок")
         tag = member.get("tag", "")
         buttons.append(
-            [InlineKeyboardButton(text=f"{name} ({tag})", callback_data=f"blacklist:target:{tag}")]
+            [InlineKeyboardButton(text=member_label(name, tag), callback_data=f"blacklist:target:{tag}")]
         )
     nav_row: list[InlineKeyboardButton] = []
     if start > 0:
@@ -25,5 +27,5 @@ def blacklist_members_kb(
         nav_row.append(InlineKeyboardButton(text="▶️", callback_data=f"blacklist:page:{page + 1}"))
     if nav_row:
         buttons.append(nav_row)
-    buttons.append([InlineKeyboardButton(text="Отмена", callback_data="blacklist:cancel")])
+    buttons.append([InlineKeyboardButton(text=label("cancel"), callback_data="blacklist:cancel")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)

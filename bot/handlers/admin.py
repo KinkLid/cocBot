@@ -34,6 +34,7 @@ from bot.services.hints import send_hint_once
 from bot.services.notifications import NotificationService, normalize_chat_prefs
 from bot.services.permissions import is_admin
 from bot.texts.hints import ADMIN_NOTIFY_HINT
+from bot.ui.labels import is_back, is_main_menu, label, label_variants
 from bot.utils.coc_time import parse_coc_time
 from bot.utils.navigation import pop_menu, reset_menu, set_menu
 from bot.utils.notify_time import format_duration_ru, parse_delay_to_minutes
@@ -223,7 +224,7 @@ def _users_pagination_kb(page: int, total_pages: int) -> InlineKeyboardMarkup:
         nav_row.append(InlineKeyboardButton(text="▶️", callback_data=f"admin_users:page:{page + 1}"))
     if nav_row:
         buttons.append(nav_row)
-    buttons.append([InlineKeyboardButton(text="Назад", callback_data="admin_users:back")])
+    buttons.append([InlineKeyboardButton(text=label("back"), callback_data="admin_users:back")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -234,7 +235,7 @@ async def _handle_admin_escape(
     sessionmaker: async_sessionmaker,
     coc_client: CocClient,
 ) -> bool:
-    if message.text == "Главное меню":
+    if is_main_menu(message.text):
         await reset_state_if_any(state)
         await reset_menu(state)
         await message.answer(
@@ -242,7 +243,7 @@ async def _handle_admin_escape(
             reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
         )
         return True
-    if message.text == "Назад":
+    if is_back(message.text):
         await reset_state_if_any(state)
         await _show_admin_menu_for_stack(message, state, config, sessionmaker, coc_client)
         return True
@@ -357,7 +358,7 @@ async def update_commands_command(
     await message.answer("Список команд обновлён.", reply_markup=admin_menu_reply())
 
 
-@router.message(F.text == "Админ-панель")
+@router.message(F.text.in_(label_variants("admin")))
 async def admin_panel_button(
     message: Message,
     state: FSMContext,
@@ -387,7 +388,7 @@ async def admin_panel_command(
     await admin_panel_button(message, state, config, coc_client)
 
 
-@router.message(F.text == "Очистить игрока")
+@router.message(F.text.in_(label_variants("admin_clear_player")))
 async def wipe_button(
     message: Message,
     state: FSMContext,
@@ -407,7 +408,7 @@ async def wipe_button(
     )
 
 
-@router.message(F.text == "Диагностика")
+@router.message(F.text.in_(label_variants("admin_diagnostics")))
 async def diagnostics_button(
     message: Message,
     state: FSMContext,
@@ -469,7 +470,7 @@ async def _send_users_page(
     )
 
 
-@router.message(F.text == "👥 Пользователи")
+@router.message(F.text.in_(label_variants("admin_users")))
 async def admin_users_button(
     message: Message,
     state: FSMContext,
@@ -523,7 +524,7 @@ async def admin_users_page(
         return
 
 
-@router.message(F.text == "🚫 Чёрный список")
+@router.message(F.text.in_(label_variants("admin_blacklist")))
 async def admin_blacklist_menu(
     message: Message,
     state: FSMContext,
@@ -540,7 +541,7 @@ async def admin_blacklist_menu(
     await message.answer("Чёрный список.", reply_markup=admin_blacklist_menu_reply())
 
 
-@router.message(F.text == "✅ Вайтлист токенов")
+@router.message(F.text.in_(label_variants("admin_whitelist")))
 async def admin_whitelist_menu(
     message: Message,
     state: FSMContext,
@@ -557,7 +558,7 @@ async def admin_whitelist_menu(
     await message.answer("Вайтлист токенов.", reply_markup=admin_whitelist_menu_reply())
 
 
-@router.message(F.text == "➕ Добавить в ЧС")
+@router.message(F.text.in_(label_variants("blacklist_add")))
 async def admin_blacklist_add_start(
     message: Message,
     state: FSMContext,
@@ -728,7 +729,7 @@ async def admin_blacklist_add_reason(
     )
 
 
-@router.message(F.text == "📋 Показать ЧС")
+@router.message(F.text.in_(label_variants("blacklist_show")))
 async def admin_blacklist_list(
     message: Message,
     state: FSMContext,
@@ -762,7 +763,7 @@ async def admin_blacklist_list(
     )
 
 
-@router.message(F.text == "🗑 Удалить из ЧС")
+@router.message(F.text.in_(label_variants("blacklist_remove")))
 async def admin_blacklist_remove_start(
     message: Message,
     state: FSMContext,
@@ -817,7 +818,7 @@ async def admin_blacklist_remove(
     )
 
 
-@router.message(F.text == "➕ Добавить токен")
+@router.message(F.text.in_(label_variants("whitelist_add")))
 async def admin_whitelist_add_start(
     message: Message,
     state: FSMContext,
@@ -911,7 +912,7 @@ async def admin_whitelist_add_comment(
     )
 
 
-@router.message(F.text == "📋 Показать вайтлист")
+@router.message(F.text.in_(label_variants("whitelist_show")))
 async def admin_whitelist_list(
     message: Message,
     state: FSMContext,
@@ -945,7 +946,7 @@ async def admin_whitelist_list(
     )
 
 
-@router.message(F.text == "🗑 Удалить токен")
+@router.message(F.text.in_(label_variants("whitelist_remove")))
 async def admin_whitelist_remove_start(
     message: Message,
     state: FSMContext,
@@ -1075,7 +1076,7 @@ async def admin_missed_command(
     await admin_missed_attacks_now(message, state, config, coc_client)
 
 
-@router.message(F.text == "Назад")
+@router.message(F.text.in_(label_variants("back")))
 async def admin_back(
     message: Message,
     state: FSMContext,
@@ -1119,7 +1120,7 @@ async def admin_back(
     )
 
 
-@router.message(F.text == "Уведомления")
+@router.message(F.text.in_(label_variants("admin_notify")))
 async def admin_notify_menu(
     message: Message,
     state: FSMContext,
@@ -1163,7 +1164,13 @@ async def _show_admin_notify_menu(
     )
 
 
-@router.message(F.text.in_({"Клановые войны (чат)", "ЛВК (чат)", "Рейды столицы (чат)"}))
+@router.message(
+    F.text.in_(
+        label_variants("admin_notify_war")
+        | label_variants("admin_notify_cwl")
+        | label_variants("admin_notify_capital")
+    )
+)
 async def admin_notify_category(
     message: Message,
     state: FSMContext,
@@ -1177,12 +1184,16 @@ async def admin_notify_category(
             reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
         )
         return
-    category_map = {
-        "Клановые войны (чат)": ("war", "admin_notify_war"),
-        "ЛВК (чат)": ("cwl", "admin_notify_cwl"),
-        "Рейды столицы (чат)": ("capital", "admin_notify_capital"),
+    base_map = {
+        "admin_notify_war": ("war", "admin_notify_war"),
+        "admin_notify_cwl": ("cwl", "admin_notify_cwl"),
+        "admin_notify_capital": ("capital", "admin_notify_capital"),
     }
-    category, menu_key = category_map.get(message.text, (None, None))
+    category_map: dict[str, tuple[str, str]] = {}
+    for key, value in base_map.items():
+        for variant in label_variants(key):
+            category_map[variant] = value
+    category, menu_key = category_map.get(message.text or "", (None, None))
     if not category:
         return
     prefs = await _get_chat_prefs(sessionmaker, config)
@@ -1194,10 +1205,14 @@ async def admin_notify_category(
 
 
 @router.message(
-    F.text.startswith("КВ:")
-    | F.text.startswith("ЛВК:")
-    | F.text.startswith("Столица:")
-    | F.text.startswith("Итоги месяца")
+    F.text.startswith("✅ КВ:")
+    | F.text.startswith("🔴 КВ:")
+    | F.text.startswith("✅ ЛВК:")
+    | F.text.startswith("🔴 ЛВК:")
+    | F.text.startswith("✅ Столица:")
+    | F.text.startswith("🔴 Столица:")
+    | F.text.startswith("✅ Итоги месяца")
+    | F.text.startswith("🔴 Итоги месяца")
 )
 async def admin_notify_toggle(
     message: Message,
@@ -1213,6 +1228,10 @@ async def admin_notify_toggle(
         )
         return
     text = message.text or ""
+    for prefix in ("✅ ", "🔴 "):
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+            break
     mapping = {
         "КВ: подготовка": ("war", "preparation"),
         "КВ: старт войны": ("war", "start"),
@@ -1243,7 +1262,7 @@ async def admin_notify_toggle(
     )
 
 
-@router.message(F.text == "🔔 Уведомления (чат)")
+@router.message(F.text.in_(label_variants("admin_notify_chat")))
 async def admin_rules_menu(
     message: Message,
     state: FSMContext,
@@ -1279,12 +1298,20 @@ async def admin_rules_choose_type(
 ) -> None:
     if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
         return
-    if message.text == "Назад":
+    if is_back(message.text):
         missed_label = await get_missed_attacks_label(coc_client, config.clan_tag)
         await message.answer("Админ-панель.", reply_markup=admin_menu_reply(missed_label))
         await state.clear()
         return
-    event_type = {"КВ": "war", "ЛВК": "cwl", "Рейды": "capital"}.get(message.text)
+    event_type_map: dict[str, str] = {}
+    for key, value in {
+        "notify_type_war": "war",
+        "notify_type_cwl": "cwl",
+        "notify_type_capital": "capital",
+    }.items():
+        for variant in label_variants(key):
+            event_type_map[variant] = value
+    event_type = event_type_map.get(message.text or "")
     if not event_type:
         await message.answer("Нужно выбрать вариант.", reply_markup=notify_rules_type_reply())
         return
@@ -1306,7 +1333,7 @@ async def admin_rules_action(
 ) -> None:
     if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
         return
-    if message.text == "Назад":
+    if is_back(message.text):
         await state.set_state(AdminState.rule_choose_type)
         await message.answer("Выберите тип уведомлений.", reply_markup=notify_rules_type_reply())
         return
@@ -1317,14 +1344,14 @@ async def admin_rules_action(
         missed_label = await get_missed_attacks_label(coc_client, config.clan_tag)
         await message.answer("Админ-панель.", reply_markup=admin_menu_reply(missed_label))
         return
-    if message.text == "➕ Добавить уведомление":
+    if message.text in label_variants("notify_add"):
         await state.set_state(AdminState.rule_delay_value)
         await message.answer(
             "Введите задержку от старта события (например, 1h, 30m, 0.1h).",
             reply_markup=notify_rules_action_reply(),
         )
         return
-    if message.text == "📋 Активные уведомления":
+    if message.text in label_variants("notify_list"):
         async with sessionmaker() as session:
             rules = (
                 await session.execute(
@@ -1343,11 +1370,11 @@ async def admin_rules_action(
             parse_mode=ParseMode.HTML,
         )
         return
-    if message.text == "✏️ Изменить уведомление":
+    if message.text in label_variants("notify_edit"):
         await state.set_state(AdminState.rule_edit_id)
         await message.answer("Введите ID уведомления для изменения.", reply_markup=notify_rules_action_reply())
         return
-    if message.text == "🗑 Удалить / Отключить уведомление":
+    if message.text in label_variants("notify_delete"):
         await state.set_state(AdminState.rule_toggle_delete)
         await message.answer(
             "Введите ID и действие: включить, отключить или удалить. Пример: 12 отключить.",
@@ -1367,7 +1394,7 @@ async def admin_rule_delay_value(
 ) -> None:
     if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
         return
-    if message.text == "Назад":
+    if is_back(message.text):
         await state.set_state(AdminState.rule_action)
         await message.answer("Выберите действие.", reply_markup=notify_rules_action_reply())
         return
@@ -1390,7 +1417,7 @@ async def admin_rule_text(
 ) -> None:
     if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
         return
-    if message.text == "Назад":
+    if is_back(message.text):
         await state.set_state(AdminState.rule_action)
         await message.answer("Выберите действие.", reply_markup=notify_rules_action_reply())
         return
@@ -1434,7 +1461,7 @@ async def admin_rule_edit_id(
 ) -> None:
     if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
         return
-    if message.text == "Назад":
+    if is_back(message.text):
         await state.set_state(AdminState.rule_action)
         await message.answer("Выберите действие.", reply_markup=notify_rules_action_reply())
         return
@@ -1459,7 +1486,7 @@ async def admin_rule_edit_delay(
 ) -> None:
     if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
         return
-    if message.text == "Назад":
+    if is_back(message.text):
         await state.set_state(AdminState.rule_action)
         await message.answer("Выберите действие.", reply_markup=notify_rules_action_reply())
         return
@@ -1485,7 +1512,7 @@ async def admin_rule_edit_text(
 ) -> None:
     if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
         return
-    if message.text == "Назад":
+    if is_back(message.text):
         await state.set_state(AdminState.rule_action)
         await message.answer("Выберите действие.", reply_markup=notify_rules_action_reply())
         return
@@ -1532,7 +1559,7 @@ async def admin_rule_toggle_delete(
 ) -> None:
     if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
         return
-    if message.text == "Назад":
+    if is_back(message.text):
         await state.set_state(AdminState.rule_action)
         await message.answer("Выберите действие.", reply_markup=notify_rules_action_reply())
         return
