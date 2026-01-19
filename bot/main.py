@@ -10,6 +10,7 @@ from bot.config import load_config
 from bot.db import build_engine, build_sessionmaker
 from bot.handlers import admin, common, complaints, hints, notify, registration, stats, targets
 from bot.jobs.scheduler import configure_scheduler
+from bot.services.commands import register_bot_commands
 from bot.services.coc_client import CocClient
 from bot.services.guards import ClanAccessMiddleware
 from bot.services.notifications import NotificationService
@@ -44,6 +45,7 @@ async def main() -> None:
 
     me = await bot.get_me()
     dp["bot_username"] = me.username
+    await register_bot_commands(bot)
 
     guard_middleware = ClanAccessMiddleware(config, sessionmaker, coc_client)
     dp.message.middleware(guard_middleware)

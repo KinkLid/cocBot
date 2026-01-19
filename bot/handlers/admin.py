@@ -24,6 +24,7 @@ from bot.keyboards.common import (
     notify_rules_action_reply,
     notify_rules_type_reply,
 )
+from bot.services.commands import register_bot_commands
 from bot.services.coc_client import CocClient
 from bot.services.hints import send_hint_once
 from bot.services.notifications import NotificationService, normalize_chat_prefs
@@ -286,6 +287,23 @@ async def wipe_command(
     )
 
 
+@router.message(Command("update_commands"))
+async def update_commands_command(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+) -> None:
+    await reset_state_if_any(state)
+    if not is_admin(message.from_user.id, config):
+        await message.answer(
+            "Админ-панель доступна только администраторам.",
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        )
+        return
+    await register_bot_commands(message.bot)
+    await message.answer("Список команд обновлён.", reply_markup=admin_menu_reply())
+
+
 @router.message(F.text == "Админ-панель")
 async def admin_panel_button(
     message: Message,
@@ -304,6 +322,16 @@ async def admin_panel_button(
     await set_menu(state, "admin_menu")
     missed_label = await get_missed_attacks_label(coc_client, config.clan_tag)
     await message.answer("Админ-панель.", reply_markup=admin_menu_reply(missed_label))
+
+
+@router.message(Command("admin"))
+async def admin_panel_command(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    coc_client: CocClient,
+) -> None:
+    await admin_panel_button(message, state, config, coc_client)
 
 
 @router.message(F.text == "Очистить игрока")
@@ -406,6 +434,17 @@ async def admin_users_button(
     await _send_users_page(message, 1, config, sessionmaker, coc_client)
 
 
+@router.message(Command("users"))
+async def admin_users_command(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+    coc_client: CocClient,
+) -> None:
+    await admin_users_button(message, state, config, sessionmaker, coc_client)
+
+
 @router.callback_query(lambda c: c.data and c.data.startswith("admin_users:"))
 async def admin_users_page(
     callback: CallbackQuery,
@@ -479,6 +518,16 @@ async def admin_missed_attacks_now(
     )
 
 
+@router.message(Command("missed"))
+async def admin_missed_command(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    coc_client: CocClient,
+) -> None:
+    await admin_missed_attacks_now(message, state, config, coc_client)
+
+
 @router.message(F.text == "Назад")
 async def admin_back(
     message: Message,
@@ -525,6 +574,25 @@ async def admin_back(
 
 @router.message(F.text == "Уведомления")
 async def admin_notify_menu(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+) -> None:
+    await _show_admin_notify_menu(message, state, config, sessionmaker)
+
+
+@router.message(Command("set_chat_notify"))
+async def admin_notify_menu_command(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+) -> None:
+    await _show_admin_notify_menu(message, state, config, sessionmaker)
+
+
+async def _show_admin_notify_menu(
     message: Message,
     state: FSMContext,
     config: BotConfig,
