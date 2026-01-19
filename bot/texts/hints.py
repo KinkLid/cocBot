@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bot.ui.labels import label_quoted
 
 REGISTER_HINT = (
     "Подготовьте player tag и API token.\n"
@@ -19,7 +20,7 @@ NOTIFY_HINT = (
 )
 
 STATS_HINT = (
-    "Статистика обновляется кнопкой «Обновить статистику».\n"
+    f"Статистика обновляется кнопкой {label_quoted('refresh_stats')}.\n"
     "Если данных нет, попробуйте обновить позже."
 )
 

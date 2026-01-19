@@ -13,6 +13,7 @@ from bot.db import models
 from bot.keyboards.common import main_menu_reply
 from bot.services.coc_client import CocClient
 from bot.services.permissions import is_admin
+from bot.ui.labels import label, label_quoted
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,7 @@ async def _is_exempt(event: Message | CallbackQuery, state_value: str | None) ->
         text = (event.text or "").strip()
         if text.startswith(("/start", "/help", "/register")):
             return True
-        if text in {"Регистрация", "Помощь / Гайд", "📜 Правила клана", "Главное меню"}:
+        if text in {label("register"), label("guide"), label("rules"), label("main_menu")}:
             return True
         return False
     data = event.data or ""
@@ -127,7 +128,7 @@ class ClanAccessMiddleware(BaseMiddleware):
                 event,
                 self._config,
                 telegram_id,
-                "Вы ещё не зарегистрированы. Нажмите «Регистрация».",
+                f"Вы ещё не зарегистрированы. Нажмите {label_quoted('register')}.",
             )
             return None
         if not in_clan:

@@ -19,6 +19,7 @@ from bot.services.hints import send_hint_once
 from bot.services.permissions import is_admin
 from bot.texts.hints import STATS_HINT
 from bot.texts.stats import STAT_LABELS
+from bot.ui.labels import label, label_quoted
 from bot.utils.navigation import reset_menu
 from bot.utils.state import reset_state_if_any
 
@@ -121,7 +122,7 @@ async def mystats_command(
         ).scalar_one_or_none()
     if not user:
         await message.answer(
-            "Вы ещё не зарегистрированы. Нажмите «Регистрация».",
+            f"Вы ещё не зарегистрированы. Нажмите {label_quoted('register')}.",
             reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
         )
         return
@@ -194,7 +195,7 @@ async def season_callback(callback: CallbackQuery, state: FSMContext, config: Bo
     await reset_state_if_any(state)
 
 
-@router.message(F.text == "Моя статистика")
+@router.message(F.text == label("stats"))
 async def mystats_button(
     message: Message,
     state: FSMContext,
@@ -205,7 +206,7 @@ async def mystats_button(
     await mystats_command(message, state, config, sessionmaker, coc_client)
 
 
-@router.message(F.text == "Обновить статистику")
+@router.message(F.text == label("refresh_stats"))
 async def stats_refresh_button(
     message: Message,
     state: FSMContext,
@@ -220,7 +221,7 @@ async def stats_refresh_button(
         ).scalar_one_or_none()
     if not user:
         await message.answer(
-            "Вы ещё не зарегистрированы. Нажмите «Регистрация».",
+            f"Вы ещё не зарегистрированы. Нажмите {label_quoted('register')}.",
             reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
         )
         return

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from bot.services.coc_client import CocClient
+from bot.ui.labels import missed_attacks_label
 
 
 async def find_current_cwl_war(coc_client: CocClient, clan_tag: str) -> dict | None:
@@ -23,11 +24,11 @@ async def find_current_cwl_war(coc_client: CocClient, clan_tag: str) -> dict | N
 async def get_missed_attacks_label(coc_client: CocClient, clan_tag: str) -> str | None:
     cwl_war = await find_current_cwl_war(coc_client, clan_tag)
     if cwl_war:
-        return "📋 Кто не атаковал (ЛВК текущая война)"
+        return missed_attacks_label("missed_attacks_cwl")
     try:
         war_data = await coc_client.get_current_war(clan_tag)
     except Exception:  # noqa: BLE001
         return None
     if war_data.get("state") in {"preparation", "inWar"}:
-        return "📋 Кто не атаковал (КВ сейчас)"
+        return missed_attacks_label("missed_attacks_war")
     return None

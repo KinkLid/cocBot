@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from bot.ui.emoji import EMOJI
+
 
 def targets_select_kb(
     enemies: list[dict],
@@ -21,13 +23,13 @@ def targets_select_kb(
         th = enemy.get("townhallLevel")
         base = f"#{pos} {name} TH{th}" if th else f"#{pos} {name}"
         if pos in my_positions and not assign_mode:
-            text = f"✅ {base}"
+            text = f"{EMOJI['toggle_on']} {base}"
             rows.append([InlineKeyboardButton(text=text, callback_data=f"targets:toggle:{pos}")])
             continue
         if pos in taken_positions:
             continue
         callback = f"targets:assign:{pos}" if assign_mode else f"targets:claim:{pos}"
-        rows.append([InlineKeyboardButton(text=base, callback_data=callback)])
+        rows.append([InlineKeyboardButton(text=f"{EMOJI['targets']} {base}", callback_data=callback)])
     if not rows:
-        rows.append([InlineKeyboardButton(text="Нет доступных целей", callback_data="targets:none")])
+        rows.append([InlineKeyboardButton(text=f"{EMOJI['info']} Нет доступных целей", callback_data="targets:none")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
