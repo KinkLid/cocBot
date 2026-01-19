@@ -25,8 +25,10 @@ from bot.keyboards.common import (
     notify_rules_type_reply,
 )
 from bot.services.coc_client import CocClient
+from bot.services.hints import send_hint_once
 from bot.services.notifications import NotificationService, normalize_chat_prefs
 from bot.services.permissions import is_admin
+from bot.texts.hints import ADMIN_NOTIFY_HINT
 from bot.utils.coc_time import parse_coc_time
 from bot.utils.navigation import pop_menu, reset_menu, set_menu
 from bot.utils.notify_time import format_duration_ru, parse_delay_to_minutes
@@ -526,6 +528,7 @@ async def admin_notify_menu(
     message: Message,
     state: FSMContext,
     config: BotConfig,
+    sessionmaker: async_sessionmaker,
 ) -> None:
     await reset_state_if_any(state)
     if not is_admin(message.from_user.id, config):
@@ -536,6 +539,13 @@ async def admin_notify_menu(
         return
     await set_menu(state, "admin_notify_menu")
     await message.answer("Уведомления: общий чат.", reply_markup=admin_notify_menu_reply())
+    await send_hint_once(
+        message,
+        sessionmaker,
+        message.from_user.id,
+        "seen_hint_admin_notify",
+        ADMIN_NOTIFY_HINT,
+    )
 
 
 @router.message(F.text.in_({"Клановые войны (чат)", "ЛВК (чат)", "Рейды столицы (чат)"}))
@@ -633,6 +643,13 @@ async def admin_rules_menu(
             reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
         )
         return
+    await send_hint_once(
+        message,
+        sessionmaker,
+        message.from_user.id,
+        "seen_hint_admin_notify",
+        ADMIN_NOTIFY_HINT,
+    )
     await state.set_state(AdminState.rule_choose_type)
     await message.answer("Выберите тип уведомлений.", reply_markup=notify_rules_type_reply())
 

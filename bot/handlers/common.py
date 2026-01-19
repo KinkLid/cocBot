@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
 from aiogram import F, Router
-from aiogram.enums import ChatType
+from aiogram.enums import ChatMemberStatus, ChatType
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -42,8 +44,12 @@ async def start_command(
     if len(args) > 1 and args[1] == "register" and message.chat.type == ChatType.PRIVATE:
         await start_registration(message, state, bot_username, config, sessionmaker)
         return
+    invite_text = ""
+    if message.chat.type == ChatType.PRIVATE:
+        invite_text = await _maybe_build_invite_text(message, sessionmaker, config)
     await message.answer(
-        "Привет! Это бот клана Clash of Clans. Нажмите «Регистрация», чтобы начать.",
+        "Привет! Это бот клана Clash of Clans. Нажмите «Регистрация», чтобы начать."
+        f"{invite_text}",
         reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
     )
 
@@ -56,6 +62,46 @@ async def _get_user_profile(
         return (
             await session.execute(select(models.User).where(models.User.telegram_id == telegram_id))
         ).scalar_one_or_none()
+
+
+async def _maybe_build_invite_text(
+    message: Message,
+    sessionmaker: async_sessionmaker,
+    config: BotConfig,
+) -> str:
+    async with sessionmaker() as session:
+        user = (
+            await session.execute(
+                select(models.User).where(models.User.telegram_id == message.from_user.id)
+            )
+        ).scalar_one_or_none()
+        needs_hint = (
+            user is None
+            or not user.last_seen_in_main_chat
+            or not user.main_chat_member_check_ok
+        )
+        if not needs_hint:
+            return ""
+        try:
+            member = await message.bot.get_chat_member(
+                chat_id=config.main_chat_id,
+                user_id=message.from_user.id,
+            )
+            if member.status in {ChatMemberStatus.LEFT, ChatMemberStatus.KICKED}:
+                return (
+                    "\n\nЕсли вы не в чате клана — вступайте сюда: "
+                    "https://t.me/+7_RomfG9Dn9mYTVi"
+                )
+            if user:
+                user.last_seen_in_main_chat = datetime.now(timezone.utc)
+                user.main_chat_member_check_ok = True
+                await session.commit()
+            return ""
+        except (TelegramBadRequest, TelegramForbiddenError):
+            return (
+                "\n\nЕсли вы не в чате клана — вступайте сюда: "
+                "https://t.me/+7_RomfG9Dn9mYTVi"
+            )
 
 @router.message(Command("me"))
 async def me_command(
@@ -137,7 +183,7 @@ async def help_command(
     await reset_menu(state)
     await message.answer(
         build_help_text(bot_username),
-        parse_mode="Markdown",
+        parse_mode="HTML",
         reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
     )
 
@@ -153,7 +199,7 @@ async def help_button(
     await reset_menu(state)
     await message.answer(
         build_help_text(bot_username),
-        parse_mode="Markdown",
+        parse_mode="HTML",
         reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
     )
 
@@ -224,7 +270,7 @@ async def menu_callbacks(
     elif callback.data == "menu:guide":
         await callback.message.answer(
             build_help_text(bot_username),
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=main_menu_reply(is_admin(callback.from_user.id, config)),
         )
     elif callback.data == "menu:admin":
@@ -237,3 +283,22 @@ async def menu_callbacks(
         await set_menu(state, "admin_menu")
         missed_label = await get_missed_attacks_label(coc_client, config.clan_tag)
         await callback.message.answer("Админ-панель.", reply_markup=admin_menu_reply(missed_label))
+
+
+@router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
+async def track_main_chat_member(
+    message: Message,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+) -> None:
+    if message.chat.id != config.main_chat_id:
+        return
+    async with sessionmaker() as session:
+        user = (
+            await session.execute(select(models.User).where(models.User.telegram_id == message.from_user.id))
+        ).scalar_one_or_none()
+        if not user:
+            return
+        user.last_seen_in_main_chat = datetime.now(timezone.utc)
+        user.main_chat_member_check_ok = True
+        await session.commit()

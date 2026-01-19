@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timezone
 
 from aiogram import F, Router
-from aiogram.enums import ChatType
+from aiogram.enums import ChatType, ParseMode
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -15,8 +15,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from bot.config import BotConfig
 from bot.db import models
 from bot.keyboards.common import main_menu_reply, registration_reply
+from bot.keyboards.hints import hint_ack_kb
 from bot.services.coc_client import CocClient
 from bot.services.permissions import is_admin
+from bot.texts.hints import REGISTER_HINT
 from bot.utils.navigation import reset_menu
 from bot.utils.state import reset_state_if_any
 from bot.utils.validators import is_valid_tag, normalize_tag
@@ -74,6 +76,7 @@ async def start_registration(
         return
     await state.clear()
     await state.set_state(RegisterState.waiting_tag)
+    await message.answer(REGISTER_HINT, parse_mode=ParseMode.HTML, reply_markup=hint_ack_kb())
     await message.answer(
         "Введите ваш player tag (например #ABC123):",
         reply_markup=registration_reply(),
@@ -122,7 +125,7 @@ async def register_tag(message: Message, state: FSMContext, config: BotConfig) -
     await state.update_data(player_tag=tag)
     await state.set_state(RegisterState.waiting_token)
     await message.answer(
-        "Теперь пришлите in-game API token (из профиля в игре):",
+        "Теперь пришлите API token из игры:",
         reply_markup=registration_reply(),
     )
 

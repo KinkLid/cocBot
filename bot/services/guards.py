@@ -75,7 +75,7 @@ async def _is_exempt(event: Message | CallbackQuery, state_value: str | None) ->
             return True
         return False
     data = event.data or ""
-    return data in {"menu:register", "menu:guide"}
+    return data in {"menu:register", "menu:guide", "hint:ok"}
 
 
 async def _deny_access(
