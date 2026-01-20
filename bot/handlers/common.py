@@ -132,12 +132,12 @@ async def me_command(
         async with sessionmaker() as session:
             whitelisted = (
                 await session.execute(
-                    select(models.WhitelistToken)
-                    .where(models.WhitelistToken.token_hash == user.token_hash)
-                    .where(models.WhitelistToken.is_active.is_(True))
+                    select(models.WhitelistPlayer)
+                    .where(models.WhitelistPlayer.player_tag == user.player_tag)
+                    .where(models.WhitelistPlayer.is_active.is_(True))
                 )
             ).scalar_one_or_none()
-        extra_line = f"\nВайтлист токена: {'да' if whitelisted else 'нет'}"
+        extra_line = f"\nВайтлист игрока: {'да' if whitelisted else 'нет'}"
     await message.answer(
         f"Профиль: {user.player_name} ({user.player_tag})\nКлан: {user.clan_tag}{extra_line}",
         reply_markup=profile_menu_reply(),

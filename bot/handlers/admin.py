@@ -40,7 +40,6 @@ from bot.utils.navigation import pop_menu, reset_menu, set_menu
 from bot.utils.notify_time import format_duration_ru, parse_delay_to_minutes
 from bot.utils.state import reset_state_if_any
 from bot.utils.tables import build_pre_table
-from bot.utils.tokens import hash_token, token_last4
 from bot.utils.war_attacks import build_missed_attacks_table, collect_missed_attacks
 from bot.utils.war_state import find_current_cwl_war, get_missed_attacks_label
 from bot.utils.notification_rules import schedule_rule_for_active_event
@@ -71,9 +70,9 @@ class AdminState(StatesGroup):
     blacklist_add_tag = State()
     blacklist_add_reason = State()
     blacklist_remove_tag = State()
-    whitelist_add_token = State()
+    whitelist_add_tag = State()
     whitelist_add_comment = State()
-    whitelist_remove_token = State()
+    whitelist_remove_tag = State()
 
 
 async def _get_chat_prefs(
@@ -200,18 +199,26 @@ def _blacklist_table(entries: list[models.BlacklistPlayer], zone: ZoneInfo) -> s
     )
 
 
-def _whitelist_table(entries: list[models.WhitelistToken], zone: ZoneInfo) -> str:
+def _whitelist_table(entries: list[models.WhitelistPlayer], zone: ZoneInfo) -> str:
     rows: list[list[str]] = []
     for entry in entries:
         created_at = _format_datetime(entry.created_at, zone)
-        suffix = entry.token_last4 or "—"
-        token_mask = f"***{suffix}" if suffix != "—" else "—"
+        name = entry.player_name or "—"
         comment = entry.comment or "—"
-        rows.append([str(entry.id), token_mask, str(entry.added_by_admin_id), created_at, comment])
+        rows.append(
+            [
+                str(entry.id),
+                entry.player_tag,
+                name,
+                str(entry.added_by_admin_id),
+                created_at,
+                comment,
+            ]
+        )
     return build_pre_table(
-        ["ID", "Токен", "Админ", "Дата", "Комментарий"],
+        ["ID", "Тег", "Имя", "Админ", "Дата", "Комментарий"],
         rows,
-        max_widths=[6, 10, 12, 16, 24],
+        max_widths=[6, 14, 16, 12, 16, 24],
     )
 
 
@@ -268,7 +275,7 @@ async def _show_admin_menu_for_stack(
         await message.answer("Чёрный список.", reply_markup=admin_blacklist_menu_reply())
         return
     if current == "admin_whitelist":
-        await message.answer("Вайтлист токенов.", reply_markup=admin_whitelist_menu_reply())
+        await message.answer("Вайтлист игроков.", reply_markup=admin_whitelist_menu_reply())
         return
     if current == "admin_notify_menu":
         await message.answer("Уведомления: общий чат.", reply_markup=admin_notify_menu_reply())
@@ -555,7 +562,7 @@ async def admin_whitelist_menu(
         )
         return
     await set_menu(state, "admin_whitelist")
-    await message.answer("Вайтлист токенов.", reply_markup=admin_whitelist_menu_reply())
+    await message.answer("Вайтлист игроков.", reply_markup=admin_whitelist_menu_reply())
 
 
 @router.message(F.text.in_(label_variants("blacklist_add")))
@@ -831,15 +838,15 @@ async def admin_whitelist_add_start(
             reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
         )
         return
-    await state.set_state(AdminState.whitelist_add_token)
+    await state.set_state(AdminState.whitelist_add_tag)
     await message.answer(
-        "Пришлите API token игрока.",
+        "Введите player tag (например #ABC123).",
         reply_markup=admin_action_reply(),
     )
 
 
-@router.message(AdminState.whitelist_add_token)
-async def admin_whitelist_add_token(
+@router.message(AdminState.whitelist_add_tag)
+async def admin_whitelist_add_tag(
     message: Message,
     state: FSMContext,
     config: BotConfig,
@@ -848,12 +855,11 @@ async def admin_whitelist_add_token(
 ) -> None:
     if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
         return
-    token = (message.text or "").strip()
-    if not token:
-        await message.answer("Нужен токен.", reply_markup=admin_action_reply())
+    tag = normalize_tag(message.text or "")
+    if not is_valid_tag(tag):
+        await message.answer("Некорректный тег. Пример: #ABC123", reply_markup=admin_action_reply())
         return
-    token_hash = hash_token(token, config.token_salt)
-    await state.update_data(whitelist_token_hash=token_hash, whitelist_token_last4=token_last4(token))
+    await state.update_data(whitelist_player_tag=tag)
     await state.set_state(AdminState.whitelist_add_comment)
     await message.answer(
         "Введите комментарий (или напишите «без комментария»):",
@@ -872,31 +878,37 @@ async def admin_whitelist_add_comment(
     if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
         return
     data = await state.get_data()
-    token_hash = data.get("whitelist_token_hash")
-    last4 = data.get("whitelist_token_last4")
-    if not token_hash:
+    player_tag = data.get("whitelist_player_tag")
+    if not player_tag:
         await reset_state_if_any(state)
-        await message.answer("Не удалось обработать токен.", reply_markup=admin_whitelist_menu_reply())
+        await message.answer("Не удалось обработать тег.", reply_markup=admin_whitelist_menu_reply())
         return
     comment_text = (message.text or "").strip()
     comment = None if comment_text.lower() == "без комментария" else comment_text
+    player_name = None
+    try:
+        player = await coc_client.get_player(player_tag)
+        player_name = player.get("name")
+    except Exception:  # noqa: BLE001
+        player_name = None
     async with sessionmaker() as session:
         entry = (
             await session.execute(
-                select(models.WhitelistToken).where(models.WhitelistToken.token_hash == token_hash)
+                select(models.WhitelistPlayer).where(models.WhitelistPlayer.player_tag == player_tag)
             )
         ).scalar_one_or_none()
         if entry:
-            entry.token_last4 = last4
             entry.comment = comment
+            if player_name:
+                entry.player_name = player_name
             entry.added_by_admin_id = message.from_user.id
             entry.created_at = datetime.now(timezone.utc)
             entry.is_active = True
         else:
             session.add(
-                models.WhitelistToken(
-                    token_hash=token_hash,
-                    token_last4=last4,
+                models.WhitelistPlayer(
+                    player_tag=player_tag,
+                    player_name=player_name,
                     comment=comment,
                     added_by_admin_id=message.from_user.id,
                     created_at=datetime.now(timezone.utc),
@@ -906,7 +918,7 @@ async def admin_whitelist_add_comment(
         await session.commit()
     await reset_state_if_any(state)
     await message.answer(
-        f"Токен добавлен в вайтлист (***{html.escape(last4 or '')}).",
+        f"Игрок {html.escape(player_tag)} добавлен в вайтлист.",
         reply_markup=admin_whitelist_menu_reply(),
         parse_mode=ParseMode.HTML,
     )
@@ -918,6 +930,7 @@ async def admin_whitelist_list(
     state: FSMContext,
     config: BotConfig,
     sessionmaker: async_sessionmaker,
+    coc_client: CocClient,
 ) -> None:
     await reset_state_if_any(state)
     if not is_admin(message.from_user.id, config):
@@ -929,18 +942,32 @@ async def admin_whitelist_list(
     async with sessionmaker() as session:
         entries = (
             await session.execute(
-                select(models.WhitelistToken)
-                .where(models.WhitelistToken.is_active.is_(True))
-                .order_by(models.WhitelistToken.created_at.desc())
+                select(models.WhitelistPlayer)
+                .where(models.WhitelistPlayer.is_active.is_(True))
+                .order_by(models.WhitelistPlayer.created_at.desc())
             )
         ).scalars().all()
+        updated_entries: list[models.WhitelistPlayer] = []
+        for entry in entries:
+            if entry.player_name:
+                continue
+            try:
+                player = await coc_client.get_player(entry.player_tag)
+            except Exception:  # noqa: BLE001
+                continue
+            name = player.get("name")
+            if name:
+                entry.player_name = name
+                updated_entries.append(entry)
+        if updated_entries:
+            await session.commit()
     if not entries:
         await message.answer("Вайтлист пуст.", reply_markup=admin_whitelist_menu_reply())
         return
     zone = ZoneInfo(config.timezone)
     table = _whitelist_table(entries, zone)
     await message.answer(
-        f"Активные токены: {len(entries)}.\n{table}",
+        f"Активные игроки: {len(entries)}.\n{table}",
         reply_markup=admin_whitelist_menu_reply(),
         parse_mode=ParseMode.HTML,
     )
@@ -959,14 +986,14 @@ async def admin_whitelist_remove_start(
             reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
         )
         return
-    await state.set_state(AdminState.whitelist_remove_token)
+    await state.set_state(AdminState.whitelist_remove_tag)
     await message.answer(
-        "Пришлите ID токена или последние 4 символа.",
+        "Пришлите ID записи или player tag.",
         reply_markup=admin_action_reply(),
     )
 
 
-@router.message(AdminState.whitelist_remove_token)
+@router.message(AdminState.whitelist_remove_tag)
 async def admin_whitelist_remove(
     message: Message,
     state: FSMContext,
@@ -978,41 +1005,35 @@ async def admin_whitelist_remove(
         return
     raw_value = (message.text or "").strip()
     if not raw_value:
-        await message.answer("Нужно указать ID или последние 4 символа.", reply_markup=admin_action_reply())
+        await message.answer("Нужно указать ID или tag.", reply_markup=admin_action_reply())
         return
     async with sessionmaker() as session:
         entry = None
         if raw_value.isdigit():
             entry = (
                 await session.execute(
-                    select(models.WhitelistToken)
-                    .where(models.WhitelistToken.id == int(raw_value))
-                    .where(models.WhitelistToken.is_active.is_(True))
+                    select(models.WhitelistPlayer)
+                    .where(models.WhitelistPlayer.id == int(raw_value))
+                    .where(models.WhitelistPlayer.is_active.is_(True))
                 )
             ).scalar_one_or_none()
         else:
-            matches = (
+            tag = normalize_tag(raw_value)
+            entry = (
                 await session.execute(
-                    select(models.WhitelistToken)
-                    .where(models.WhitelistToken.token_last4 == raw_value)
-                    .where(models.WhitelistToken.is_active.is_(True))
+                    select(models.WhitelistPlayer)
+                    .where(models.WhitelistPlayer.player_tag == tag)
+                    .where(models.WhitelistPlayer.is_active.is_(True))
                 )
-            ).scalars().all()
-            if len(matches) > 1:
-                await message.answer(
-                    "Найдено несколько токенов с таким окончанием. Укажите ID.",
-                    reply_markup=admin_action_reply(),
-                )
-                return
-            entry = matches[0] if matches else None
+            ).scalar_one_or_none()
         if not entry:
-            await message.answer("Токен не найден.", reply_markup=admin_whitelist_menu_reply())
+            await message.answer("Игрок не найден в вайтлисте.", reply_markup=admin_whitelist_menu_reply())
             return
         entry.is_active = False
         await session.commit()
     await reset_state_if_any(state)
     await message.answer(
-        f"Токен ***{html.escape(entry.token_last4 or '')} удалён из вайтлиста.",
+        f"Игрок {html.escape(entry.player_tag)} удалён из вайтлиста.",
         reply_markup=admin_whitelist_menu_reply(),
         parse_mode=ParseMode.HTML,
     )

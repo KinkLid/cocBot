@@ -27,15 +27,15 @@ LABELS = {
     "admin_diagnostics": "Диагностика",
     "admin_users": "Пользователи",
     "admin_blacklist": "Чёрный список",
-    "admin_whitelist": "Вайтлист токенов",
+    "admin_whitelist": "Вайтлист игроков",
     "admin_notify_chat": "Уведомления (чат)",
     "admin_notify": "Уведомления",
     "blacklist_add": "Добавить в ЧС",
     "blacklist_show": "Показать ЧС",
     "blacklist_remove": "Удалить из ЧС",
-    "whitelist_add": "Добавить токен",
+    "whitelist_add": "Добавить игрока (по тегу)",
     "whitelist_show": "Показать вайтлист",
-    "whitelist_remove": "Удалить токен",
+    "whitelist_remove": "Удалить из вайтлиста",
     "delete": "Удалить",
     "notify_type_war": "КВ",
     "notify_type_cwl": "ЛВК",
@@ -55,6 +55,10 @@ LABELS = {
     "cancel": "Отмена",
     "ack": "Понятно",
     "no_targets": "Нет доступных целей",
+}
+
+LABEL_ALIASES = {
+    "mystats": {"Показать статистику", "📊 Показать статистику"},
 }
 
 MENU_ACTIONS = {
@@ -82,8 +86,11 @@ def label_variants(key: str) -> set[str]:
     base = LABELS[key]
     value = label(key)
     if value == base:
-        return {base}
-    return {base, value}
+        variants = {base}
+    else:
+        variants = {base, value}
+    variants |= LABEL_ALIASES.get(key, set())
+    return variants
 
 
 def menu_text_actions() -> dict[str, str]:

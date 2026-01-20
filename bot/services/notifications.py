@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from bot.config import BotConfig
 from bot.db import models
 from bot.services.coc_client import CocClient
-from bot.services.complaints import notify_admins_about_complaint
+from bot.services.complaints import notify_admins_complaint
 from bot.ui.labels import label
 from bot.utils.coc_time import parse_coc_time
 from bot.utils.notify_time import format_duration_ru
@@ -99,7 +99,7 @@ class NotificationService:
             f"Ливнул: {left_at}, вернулся: {rejoined_at}, всего ливов: {leave_count}",
         ]
         if whitelisted:
-            lines.append("Вайтлист токена: да")
+            lines.append("Вайтлист игрока: да")
         text = "\n".join(lines)
         for admin_id in self._config.admin_telegram_ids:
             try:
@@ -174,25 +174,19 @@ class NotificationService:
 
             if rejoined_payloads:
                 tags = [payload["tag"] for payload in rejoined_payloads]
-                users = (
-                    await session.execute(select(models.User).where(models.User.player_tag.in_(tags)))
-                ).scalars().all()
-                tag_to_hash = {user.player_tag: user.token_hash for user in users if user.token_hash}
-                token_hashes = list(tag_to_hash.values())
-                whitelisted_hashes: set[str] = set()
-                if token_hashes:
-                    whitelisted_hashes = set(
+                whitelisted_tags: set[str] = set()
+                if tags:
+                    whitelisted_tags = set(
                         (
                             await session.execute(
-                                select(models.WhitelistToken.token_hash)
-                                .where(models.WhitelistToken.token_hash.in_(token_hashes))
-                                .where(models.WhitelistToken.is_active.is_(True))
+                                select(models.WhitelistPlayer.player_tag)
+                                .where(models.WhitelistPlayer.player_tag.in_(tags))
+                                .where(models.WhitelistPlayer.is_active.is_(True))
                             )
                         ).scalars().all()
                     )
                 for payload in rejoined_payloads:
-                    token_hash = tag_to_hash.get(payload["tag"])
-                    payload["whitelisted"] = bool(token_hash and token_hash in whitelisted_hashes)
+                    payload["whitelisted"] = payload["tag"] in whitelisted_tags
 
             await session.commit()
 
@@ -882,24 +876,15 @@ class NotificationService:
             attacker_tags = {violation["attacker_tag"] for violation in violations}
             whitelisted_tags: set[str] = set()
             if attacker_tags:
-                users = (
-                    await session.execute(select(models.User).where(models.User.player_tag.in_(attacker_tags)))
-                ).scalars().all()
-                tag_to_hash = {user.player_tag: user.token_hash for user in users if user.token_hash}
-                token_hashes = list(tag_to_hash.values())
-                if token_hashes:
-                    whitelisted_hashes = set(
-                        (
-                            await session.execute(
-                                select(models.WhitelistToken.token_hash)
-                                .where(models.WhitelistToken.token_hash.in_(token_hashes))
-                                .where(models.WhitelistToken.is_active.is_(True))
-                            )
-                        ).scalars().all()
-                    )
-                    whitelisted_tags = {
-                        tag for tag, token_hash in tag_to_hash.items() if token_hash in whitelisted_hashes
-                    }
+                whitelisted_tags = set(
+                    (
+                        await session.execute(
+                            select(models.WhitelistPlayer.player_tag)
+                            .where(models.WhitelistPlayer.player_tag.in_(attacker_tags))
+                            .where(models.WhitelistPlayer.is_active.is_(True))
+                        )
+                    ).scalars().all()
+                )
             for violation in violations:
                 exists = (
                     await session.execute(
@@ -942,7 +927,7 @@ class NotificationService:
                 await session.commit()
 
         for complaint, violation in created:
-            await notify_admins_about_complaint(self._bot, self._config, complaint)
+            await notify_admins_complaint(self._bot, self._config, complaint)
             warning_text = (
                 "<b>⚠️ Предупреждение</b>\n"
                 f"Вы атаковали цель #{violation['defender_position']}, "

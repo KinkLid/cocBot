@@ -2,6 +2,7 @@ bot_token: "telegram-bot-token"
 coc_api_token: "clash-api-token"
 clan_tag: "#ABC123"
 main_chat_id: -1001234567890
+admin_chat_id: -1009876543210
 admin_telegram_ids:
   - 123456789
   - 987654321

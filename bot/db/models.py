@@ -326,12 +326,12 @@ class BlacklistPlayer(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
-class WhitelistToken(Base):
-    __tablename__ = "whitelist_tokens"
+class WhitelistPlayer(Base):
+    __tablename__ = "whitelist_players"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
-    token_last4: Mapped[Optional[str]] = mapped_column(String(8))
+    player_tag: Mapped[str] = mapped_column(String(16), unique=True)
+    player_name: Mapped[Optional[str]] = mapped_column(String(64))
     comment: Mapped[Optional[str]] = mapped_column(Text)
     added_by_admin_id: Mapped[int] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)

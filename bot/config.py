@@ -14,6 +14,7 @@ class BotConfig:
     coc_api_token: str
     clan_tag: str
     main_chat_id: int
+    admin_chat_id: int | None
     admin_telegram_ids: set[int]
     timezone: str
     database_url: str
@@ -38,6 +39,7 @@ def load_config() -> BotConfig:
     coc_api_token = env.get("COC_API_TOKEN", data.get("coc_api_token"))
     clan_tag = env.get("CLAN_TAG", data.get("clan_tag"))
     main_chat_id = env.get("MAIN_CHAT_ID", data.get("main_chat_id"))
+    admin_chat_id = env.get("ADMIN_CHAT_ID", data.get("admin_chat_id"))
     admin_ids = env.get("ADMIN_TELEGRAM_IDS", data.get("admin_telegram_ids", []))
     timezone = env.get("TIMEZONE", data.get("timezone", "Europe/Moscow"))
     database_url = env.get("DATABASE_URL", data.get("database_url"))
@@ -70,6 +72,7 @@ def load_config() -> BotConfig:
         coc_api_token=str(coc_api_token),
         clan_tag=str(clan_tag).upper(),
         main_chat_id=int(main_chat_id),
+        admin_chat_id=int(admin_chat_id) if admin_chat_id is not None else None,
         admin_telegram_ids=admin_ids,
         timezone=str(timezone),
         database_url=str(database_url),
