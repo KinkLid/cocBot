@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import logging
+from datetime import datetime, timedelta, timezone
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
@@ -25,6 +26,7 @@ from bot.texts.hints import TARGETS_HINT
 from bot.ui.labels import admin_unclaim_label, is_back, is_main_menu, label, label_variants
 from bot.utils.navigation import reset_menu
 from bot.utils.state import reset_state_if_any
+from bot.utils.coc_time import parse_coc_time
 from bot.utils.validators import normalize_tag
 
 logger = logging.getLogger(__name__)
@@ -72,6 +74,35 @@ def _is_user_in_war(user: models.User, war: dict) -> bool:
         if member.get("tag")
     }
     return user_tag in member_tags
+
+
+def _resolve_member_position(war: dict, player_tag: str | None) -> int | None:
+    normalized_tag = _normalize_member_tag(player_tag)
+    if not normalized_tag:
+        return None
+    members = war.get("clan", {}).get("members", [])
+    for member in members:
+        member_tag = _normalize_member_tag(member.get("tag"))
+        if member_tag == normalized_tag:
+            return member.get("mapPosition")
+    return None
+
+
+def _is_position_limit_active(war: dict) -> bool:
+    start_time = parse_coc_time(war.get("startTime"))
+    if not start_time:
+        return False
+    now = datetime.now(timezone.utc)
+    return now - start_time <= timedelta(hours=12)
+
+
+def _is_target_position_allowed(war: dict, user: models.User, target_position: int) -> bool:
+    if not _is_position_limit_active(war):
+        return True
+    member_position = _resolve_member_position(war, user.player_tag)
+    if not member_position:
+        return True
+    return target_position <= member_position + 10
 
 
 async def _safe_delete_message(message: Message, notify_text: str | None = None) -> bool:
@@ -252,17 +283,29 @@ async def _build_selection_markup(
     war: dict,
     war_row: models.War,
     sessionmaker: async_sessionmaker,
-    user_id: int,
+    user: models.User,
     admin_mode: bool,
 ) -> InlineKeyboardMarkup:
     enemies = _sorted_enemies(war.get("opponent", {}).get("members", []))
     claims = await _load_claims(sessionmaker, war_row.id)
-    taken = {claim.enemy_position for claim in claims if claim.claimed_by_telegram_id != user_id}
-    my_claims = {claim.enemy_position for claim in claims if claim.claimed_by_telegram_id == user_id}
+    taken = {claim.enemy_position for claim in claims if claim.claimed_by_telegram_id != user.telegram_id}
+    my_claims = {claim.enemy_position for claim in claims if claim.claimed_by_telegram_id == user.telegram_id}
+    if _is_position_limit_active(war):
+        max_position = None
+        member_position = _resolve_member_position(war, user.player_tag)
+        if member_position:
+            max_position = member_position + 10
+        if max_position:
+            enemies = [
+                enemy
+                for enemy in enemies
+                if (enemy.get("mapPosition") or 0) <= max_position
+                or (enemy.get("mapPosition") in my_claims)
+            ]
     admin_rows: list[tuple[str, str]] = []
     if admin_mode:
         for claim in claims:
-            if claim.claimed_by_telegram_id == user_id:
+            if claim.claimed_by_telegram_id == user.telegram_id:
                 continue
             admin_rows.append(
                 (
@@ -278,10 +321,10 @@ async def _show_selection(
     war: dict,
     war_row: models.War,
     sessionmaker: async_sessionmaker,
-    user_id: int,
+    user: models.User,
     admin_mode: bool,
 ) -> None:
-    markup = await _build_selection_markup(war, war_row, sessionmaker, user_id, admin_mode)
+    markup = await _build_selection_markup(war, war_row, sessionmaker, user, admin_mode)
     try:
         await message.answer(
             "Выберите противника:",
@@ -296,14 +339,14 @@ async def _refresh_selection(
     war: dict,
     war_row: models.War,
     sessionmaker: async_sessionmaker,
-    user_id: int,
+    user: models.User,
     admin_mode: bool,
 ) -> None:
-    markup = await _build_selection_markup(war, war_row, sessionmaker, user_id, admin_mode)
+    markup = await _build_selection_markup(war, war_row, sessionmaker, user, admin_mode)
     if callback.message is None:
         logger.warning(
             "Failed to refresh selection: missing message (user_id=%s war_id=%s)",
-            user_id,
+            user.telegram_id,
             war_row.id,
         )
         return
@@ -422,7 +465,7 @@ async def targets_select_button(
         war,
         war_row,
         sessionmaker,
-        message.from_user.id,
+        user,
         is_admin(message.from_user.id, config),
     )
 
@@ -511,6 +554,20 @@ async def target_claim(
             "Ты не участвуешь в этой войне, поэтому не можешь выбирать цели."
         )
         return
+    if not _is_target_position_allowed(war, user, position):
+        await callback.answer(
+            "Нельзя брать цель ниже чем на 10 позиций от своей (первые 12 часов).",
+            show_alert=True,
+        )
+        await _refresh_selection(
+            callback,
+            war,
+            war_row,
+            sessionmaker,
+            user,
+            is_admin(user_id, config),
+        )
+        return
     logger.info("Target claim resolved war (user_id=%s war_id=%s position=%s)", user_id, war_row.id, position)
 
     result_action = None
@@ -559,7 +616,7 @@ async def target_claim(
                         war,
                         war_row,
                         sessionmaker,
-                        user_id,
+                        user,
                         is_admin(user_id, config),
                     )
                     return
@@ -579,7 +636,7 @@ async def target_claim(
                         war,
                         war_row,
                         sessionmaker,
-                        user_id,
+                        user,
                         is_admin(user_id, config),
                     )
                     return
@@ -607,7 +664,7 @@ async def target_claim(
                     war,
                     war_row,
                     sessionmaker,
-                    user_id,
+                    user,
                     is_admin(user_id, config),
                 )
                 return
@@ -641,7 +698,7 @@ async def target_claim(
         war,
         war_row,
         sessionmaker,
-        user_id,
+        user,
         is_admin(user_id, config),
     )
     if result_action == "unclaimed":
@@ -711,7 +768,7 @@ async def target_toggle(
                     war,
                     war_row,
                     sessionmaker,
-                    user_id,
+                    user,
                     is_admin(user_id, config),
                 )
                 return
@@ -738,7 +795,7 @@ async def target_toggle(
         war,
         war_row,
         sessionmaker,
-        user_id,
+        user,
         is_admin(user_id, config),
     )
     await callback.message.answer(f"Цель #{position} освобождена.")
@@ -762,6 +819,10 @@ async def target_admin_unclaim(
     )
     if not is_admin(callback.from_user.id, config):
         await callback.message.answer("Доступно только администраторам.")
+        return
+    admin_user = await _load_user(sessionmaker, callback.from_user.id)
+    if not admin_user:
+        await callback.message.answer(f"Сначала зарегистрируйтесь. Нажмите «{label('register')}».")
         return
     position = int(callback.data.split(":")[2])
     war = await _load_war(coc_client, config.clan_tag)
@@ -792,7 +853,7 @@ async def target_admin_unclaim(
                     war,
                     war_row,
                     sessionmaker,
-                    callback.from_user.id,
+                    admin_user,
                     True,
                 )
                 return
@@ -819,7 +880,7 @@ async def target_admin_unclaim(
         war,
         war_row,
         sessionmaker,
-        callback.from_user.id,
+        admin_user,
         True,
     )
     await callback.message.answer(f"Назначение для цели #{position} снято.")
