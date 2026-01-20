@@ -17,7 +17,7 @@ from bot.db import models
 from bot.keyboards.common import admin_menu_reply, main_menu_reply
 from bot.keyboards.complaints import complaint_admin_kb, complaint_text_reply, complaints_members_kb
 from bot.services.coc_client import CocClient
-from bot.services.complaints import build_complaint_message, notify_admins_about_complaint
+from bot.services.complaints import build_complaint_message, notify_admins_complaint
 from bot.services.permissions import is_admin
 from bot.ui.labels import is_main_menu, label, label_variants
 from bot.utils.navigation import reset_menu
@@ -255,7 +255,7 @@ async def complaint_text(
         await session.commit()
         await session.refresh(complaint)
 
-    await notify_admins_about_complaint(message.bot, config, complaint)
+    await notify_admins_complaint(message.bot, config, complaint)
     await reset_state_if_any(state)
     await reset_menu(state)
     await message.answer(

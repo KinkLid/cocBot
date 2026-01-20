@@ -47,22 +47,14 @@ def build_complaint_message(complaint: models.Complaint, timezone_name: str) -> 
     return "\n".join(lines)
 
 
-async def notify_admins_about_complaint(
+async def notify_admins_complaint(
     bot: Bot,
     config: BotConfig,
     complaint: models.Complaint,
 ) -> None:
     text = build_complaint_message(complaint, config.timezone)
     markup = complaint_admin_kb(complaint.id)
-    try:
-        await bot.send_message(
-            chat_id=config.main_chat_id,
-            text=text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=markup,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Failed to send complaint %s to main chat: %s", complaint.id, exc)
+    dm_count = 0
     for admin_id in config.admin_telegram_ids:
         try:
             await bot.send_message(
@@ -71,5 +63,28 @@ async def notify_admins_about_complaint(
                 parse_mode=ParseMode.HTML,
                 reply_markup=markup,
             )
+            dm_count += 1
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to send complaint %s to admin %s: %s", complaint.id, admin_id, exc)
+    admin_chat_used = False
+    if config.admin_chat_id and config.admin_chat_id != config.main_chat_id:
+        try:
+            await bot.send_message(
+                chat_id=config.admin_chat_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=markup,
+            )
+            admin_chat_used = True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to send complaint %s to admin chat %s: %s",
+                complaint.id,
+                config.admin_chat_id,
+                exc,
+            )
+    logger.info(
+        "Complaint sent to admins: dm_count=%s admin_chat_used=%s",
+        dm_count,
+        admin_chat_used,
+    )

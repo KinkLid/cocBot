@@ -111,18 +111,18 @@ async def _is_blacklist_exempt(event: Message | CallbackQuery, state_value: str 
     return data in {"menu:complaint", "menu:guide", "menu:rules", "complaint:cancel"}
 
 
-async def _is_whitelisted_token(
+async def _is_whitelisted_player(
     sessionmaker: async_sessionmaker,
-    token_hash: str | None,
+    player_tag: str | None,
 ) -> bool:
-    if not token_hash:
+    if not player_tag:
         return False
     async with sessionmaker() as session:
         row = (
             await session.execute(
-                select(models.WhitelistToken)
-                .where(models.WhitelistToken.token_hash == token_hash)
-                .where(models.WhitelistToken.is_active.is_(True))
+                select(models.WhitelistPlayer)
+                .where(models.WhitelistPlayer.player_tag == player_tag)
+                .where(models.WhitelistPlayer.is_active.is_(True))
             )
         ).scalar_one_or_none()
         return row is not None
@@ -196,7 +196,7 @@ class ClanAccessMiddleware(BaseMiddleware):
             )
             return None
         if not is_admin(telegram_id, self._config):
-            whitelisted = await _is_whitelisted_token(self._sessionmaker, user.token_hash)
+            whitelisted = await _is_whitelisted_player(self._sessionmaker, user.player_tag)
             if not whitelisted:
                 blacklisted = await _is_blacklisted_player(self._sessionmaker, user.player_tag)
                 if blacklisted and not await _is_blacklist_exempt(event, state_value):
