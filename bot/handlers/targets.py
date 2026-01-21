@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import html
 import logging
 
 from aiogram import F, Router
@@ -23,6 +22,7 @@ from bot.services.coc_client import CocClient
 from bot.services.hints import send_hint_once
 from bot.texts.hints import TARGETS_HINT
 from bot.ui.labels import admin_unclaim_label, is_back, is_main_menu, label, label_variants
+from bot.ui.renderers import render_targets_table
 from bot.utils.navigation import reset_menu
 from bot.utils.state import reset_state_if_any
 from bot.utils.validators import is_valid_tag, normalize_player_name, normalize_tag
@@ -184,75 +184,6 @@ async def _load_user(sessionmaker: async_sessionmaker, telegram_id: int) -> mode
         ).scalar_one_or_none()
 
 
-def _safe_text(value: str | None) -> str:
-    if not value:
-        return "?"
-    return value.replace("`", "'").replace("\n", " ").replace("|", "/").strip()
-
-
-def _build_table_lines(
-    enemies: list[dict],
-    claims: list[models.TargetClaim],
-    user_map: dict[int, models.User],
-) -> list[str]:
-    claims_map = {claim.enemy_position: claim for claim in claims}
-    rows: list[str] = []
-    free_positions: list[str] = []
-    for index, enemy in enumerate(_sorted_enemies(enemies), start=1):
-        pos = str(enemy.get("mapPosition") or "?")
-        name = _safe_text(enemy.get("name"))
-        th = enemy.get("townhallLevel")
-        enemy_label = f"{name} TH{th}" if th else name
-        claim = claims_map.get(enemy.get("mapPosition"))
-        if not claim:
-            free_positions.append(pos)
-            rows.append(f"{index}) #{pos} — {enemy_label} — свободно")
-            continue
-        reserved_label = _format_reserved_label(
-            claim.reserved_for_player_name,
-            claim.reserved_for_player_tag,
-        )
-        if reserved_label:
-            holder = _safe_text(reserved_label)
-        elif claim.claimed_by_user_id:
-            user = user_map.get(claim.claimed_by_user_id)
-            if user:
-                tg_name = f"@{user.username}" if user.username else user.player_name
-                holder = _safe_text(f"{tg_name} / {user.player_name}")
-            else:
-                holder = "участник"
-        else:
-            holder = "участник"
-        rows.append(f"{index}) #{pos} — {enemy_label} — занято: {holder}")
-
-    if not rows:
-        return ["Нет противников для отображения."]
-
-    lines = ["<b>🎯 Цели на войне</b>"]
-    lines.extend([html.escape(line) for line in rows])
-    if free_positions:
-        free_list = ", ".join(f"#{pos}" for pos in free_positions)
-        lines.extend(["", f"Свободные: {html.escape(free_list)}"])
-    return lines
-
-
-def _chunk_lines(lines: list[str], max_chars: int = 3400) -> list[list[str]]:
-    chunks: list[list[str]] = []
-    current: list[str] = []
-    current_len = 0
-    for line in lines:
-        line_len = len(line) + 1
-        if current and current_len + line_len > max_chars:
-            chunks.append(current)
-            current = []
-            current_len = 0
-        current.append(line)
-        current_len += line_len
-    if current:
-        chunks.append(current)
-    return chunks
-
-
 async def _build_table_messages(
     enemies: list[dict],
     claims: list[models.TargetClaim],
@@ -261,21 +192,43 @@ async def _build_table_messages(
     async with sessionmaker() as session:
         users = (await session.execute(select(models.User))).scalars().all()
     user_map = {user.telegram_id: user for user in users}
-    lines = _build_table_lines(enemies, claims, user_map)
-    if lines and lines[0].startswith("Нет"):
-        return ["\n".join(lines)]
-
-    header_lines = lines[:1]
-    data_lines = lines[1:]
-    chunks: list[list[str]] = []
-    if not data_lines:
-        chunks = [lines]
-    else:
-        data_chunks = _chunk_lines(data_lines)
-        for chunk in data_chunks:
-            combined = [*header_lines, *chunk]
-            chunks.append(combined)
-    return ["\n".join(chunk) for chunk in chunks]
+    claims_map = {claim.enemy_position: claim for claim in claims}
+    rows: list[dict[str, str | int | None]] = []
+    for enemy in _sorted_enemies(enemies):
+        pos = enemy.get("mapPosition")
+        claim = claims_map.get(pos)
+        holder = None
+        status = "free"
+        if claim:
+            status = "taken"
+            reserved_label = _format_reserved_label(
+                claim.reserved_for_player_name,
+                claim.reserved_for_player_tag,
+            )
+            if reserved_label:
+                holder = reserved_label
+            elif claim.claimed_by_user_id:
+                user = user_map.get(claim.claimed_by_user_id)
+                if user:
+                    tg_name = f"@{user.username}" if user.username else user.player_name
+                    holder = f"{tg_name} / {user.player_name}"
+                else:
+                    holder = "участник"
+            else:
+                holder = "участник"
+        rows.append(
+            {
+                "position": pos,
+                "name": enemy.get("name"),
+                "townhall": enemy.get("townhallLevel"),
+                "status": status,
+                "holder": holder,
+            }
+        )
+    return render_targets_table(
+        rows,
+        hint=f"Нажмите «{label('targets_select')}», чтобы забронировать цель.",
+    )
 
 
 async def _build_selection_markup(

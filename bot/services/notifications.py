@@ -19,14 +19,15 @@ from bot.db import models
 from bot.services.coc_client import CocClient
 from bot.services.complaints import notify_admins_complaint
 from bot.ui.labels import label
+from bot.ui.renderers import chunk_message, render_cwl_summary, render_missed_attacks
 from bot.utils.coc_time import parse_coc_time
 from bot.utils.notification_events import (
     build_capital_event_key,
     build_cwl_event_key,
     build_war_event_key,
 )
-from bot.utils.notify_time import format_duration_ru
-from bot.utils.war_attacks import build_missed_attacks_list, build_total_attacks_list, collect_missed_attacks
+from bot.utils.notify_time import format_duration_ru, format_duration_ru_seconds
+from bot.utils.war_attacks import collect_missed_attacks
 from bot.utils.validators import normalize_player_name, normalize_tag
 from bot.utils.war_rules import get_war_start_time, is_rules_window_active
 
@@ -563,23 +564,27 @@ class NotificationService:
         else:
             clan, enemy = _resolve_war_sides(war_data, self._config.clan_tag)
             result = _format_war_result(clan, enemy)
-            score = f"{clan.get('stars', 0)}:{enemy.get('stars', 0)}"
-            destruction = None
-            if clan.get("destructionPercentage") is not None:
-                destruction = f"{clan.get('destructionPercentage', 0)}% : {enemy.get('destructionPercentage', 0)}%"
-            text = (
-                f"<b>🏁 КВ против {opponent} завершилась: {result}</b>\n"
-                f"Счёт звёзд: {score}"
-            )
-            if destruction:
-                text += f"\nРазрушение: {destruction}"
-            missing_table = _build_missing_attacks_section(
+            clan_stars = clan.get("stars", 0)
+            enemy_stars = enemy.get("stars", 0)
+            clan_destr = clan.get("destructionPercentage", 0)
+            enemy_destr = enemy.get("destructionPercentage", 0)
+            lines = [
+                "<b>🏁 Итоги войны</b>",
+                f"<b>Противник:</b> {opponent}",
+                f"<b>Результат:</b> {result}",
+                f"<b>Счёт:</b> ⭐️ {clan_stars} — {enemy_stars} ⭐️",
+                f"<b>Разрушение:</b> {clan_destr}% — {enemy_destr}%",
+            ]
+            missing_section = render_missed_attacks(
+                "Кто не атаковал",
                 war_data,
                 self._config.clan_tag,
-                title="Кто не атаковал",
+                include_overview=False,
             )
-            if missing_table:
-                text += f"\n\n{missing_table}"
+            if missing_section:
+                lines.append("")
+                lines.append(missing_section)
+            text = "\n".join(lines)
             dm_text = text
             notify_type = "war_end"
 
@@ -598,10 +603,9 @@ class NotificationService:
             sections.append(_format_top_list("🏗 Вклад в столицу", stats["capital"]))
         if not sections:
             sections.append("Данных пока недостаточно для топов.")
-        summary = await self._collect_cwl_attack_summary()
-        if summary:
-            sections.append("Кто сколько атак сделал:")
-            sections.append(summary)
+        summary_rows = await self._collect_cwl_attack_summary()
+        if summary_rows:
+            sections.append(render_cwl_summary(summary_rows))
         text = "\n\n".join([header, *sections])
         await self._send_chat_notification(text, "monthly_summary")
         await self._send_dm_notifications("ЛВК завершена. Итоги опубликованы в общем чате.", "monthly_summary")
@@ -717,8 +721,13 @@ class NotificationService:
 
     async def _build_reminder_message(self, reminder: models.ScheduledNotification) -> str | None:
         description = html.escape(reminder.message_text or "")
+        delay_seconds = reminder.context.get("delay_seconds")
         delay_minutes = reminder.context.get("delay_minutes")
-        delay_text = format_duration_ru(delay_minutes) if isinstance(delay_minutes, int) else None
+        delay_text = None
+        if isinstance(delay_seconds, int):
+            delay_text = format_duration_ru_seconds(delay_seconds)
+        elif isinstance(delay_minutes, int):
+            delay_text = format_duration_ru(delay_minutes)
         if reminder.category == "war":
             war_data = await self._coc.get_current_war(self._config.clan_tag)
             if reminder.context.get("war_tag") and war_data.get("tag") != reminder.context.get("war_tag"):
@@ -880,11 +889,12 @@ class NotificationService:
             if not _is_within_dm_window(prefs, self._config.timezone):
                 return
             try:
-                await self._bot.send_message(
-                    chat_id=user.telegram_id,
-                    text=text,
-                    parse_mode=ParseMode.HTML,
-                )
+                for chunk in chunk_message(text):
+                    await self._bot.send_message(
+                        chat_id=user.telegram_id,
+                        text=chunk,
+                        parse_mode=ParseMode.HTML,
+                    )
             except TelegramForbiddenError:
                 prefs["dm_enabled"] = False
                 user.notify_pref = prefs
@@ -905,11 +915,12 @@ class NotificationService:
             if not _is_within_dm_window(prefs, self._config.timezone):
                 return
             try:
-                await self._bot.send_message(
-                    chat_id=user.telegram_id,
-                    text=text,
-                    parse_mode=ParseMode.HTML,
-                )
+                for chunk in chunk_message(text):
+                    await self._bot.send_message(
+                        chat_id=user.telegram_id,
+                        text=chunk,
+                        parse_mode=ParseMode.HTML,
+                    )
             except TelegramForbiddenError:
                 prefs["dm_enabled"] = False
                 user.notify_pref = prefs
@@ -921,8 +932,7 @@ class NotificationService:
         instance: models.NotificationInstance,
         rule: models.NotificationRule,
     ) -> str | None:
-        delay_minutes = max(0, rule.delay_seconds // 60)
-        delay_text = format_duration_ru(delay_minutes) if delay_minutes else None
+        delay_text = format_duration_ru_seconds(rule.delay_seconds) if rule.delay_seconds else None
         description = html.escape(rule.custom_text or "")
         if rule.event_type == "war":
             war_data = await self._coc.get_current_war(self._config.clan_tag)
@@ -1145,7 +1155,7 @@ class NotificationService:
             warning_lines.append("Если это ошибка — напишите админам через кнопку «Жалоба».")
             await self._send_warning_dm(violation["attacker_tag"], "\n".join(warning_lines))
 
-    async def _collect_cwl_attack_summary(self) -> str | None:
+    async def _collect_cwl_attack_summary(self) -> list[dict[str, int | str]] | None:
         try:
             league = await self._coc.get_league_group(self._config.clan_tag)
         except Exception as exc:  # noqa: BLE001
@@ -1186,7 +1196,7 @@ class NotificationService:
                     "missed": missed,
                 }
             )
-        return build_total_attacks_list(rows)
+        return rows
 
     def _format_cwl_start(self, war: dict[str, Any]) -> str:
         opponent = html.escape(war.get("opponent", {}).get("name") or "противник")
@@ -1196,16 +1206,27 @@ class NotificationService:
         clan, enemy = _resolve_war_sides(war, self._config.clan_tag)
         opponent = html.escape(enemy.get("name") or "противник")
         result = _format_war_result(clan, enemy)
-        score = f"{clan.get('stars', 0)}:{enemy.get('stars', 0)}"
-        text = f"<b>🏁 ЛВК против {opponent} завершён ({result}).</b>\nСчёт: {score}"
-        missing_table = _build_missing_attacks_section(
+        clan_stars = clan.get("stars", 0)
+        enemy_stars = enemy.get("stars", 0)
+        clan_destr = clan.get("destructionPercentage", 0)
+        enemy_destr = enemy.get("destructionPercentage", 0)
+        lines = [
+            "<b>🏁 Итоги ЛВК</b>",
+            f"<b>Противник:</b> {opponent}",
+            f"<b>Результат:</b> {result}",
+            f"<b>Счёт:</b> ⭐️ {clan_stars} — {enemy_stars} ⭐️",
+            f"<b>Разрушение:</b> {clan_destr}% — {enemy_destr}%",
+        ]
+        missing_section = render_missed_attacks(
+            "Кто не атаковал",
             war,
             self._config.clan_tag,
-            title="Кто не атаковал",
+            include_overview=False,
         )
-        if missing_table:
-            text += f"\n\n{missing_table}"
-        return text
+        if missing_section:
+            lines.append("")
+            lines.append(missing_section)
+        return "\n".join(lines)
 
     def _format_capital_start(self, raid: dict[str, Any]) -> str:
         return "<b>🏗 Начались рейды клановой столицы!</b>"
@@ -1239,11 +1260,12 @@ class NotificationService:
             if not _is_within_dm_window(prefs, self._config.timezone):
                 return
             try:
-                await self._bot.send_message(
-                    chat_id=user.telegram_id,
-                    text=text,
-                    parse_mode=ParseMode.HTML,
-                )
+                for chunk in chunk_message(text):
+                    await self._bot.send_message(
+                        chat_id=user.telegram_id,
+                        text=chunk,
+                        parse_mode=ParseMode.HTML,
+                    )
             except TelegramForbiddenError:
                 prefs["dm_enabled"] = False
                 user.notify_pref = prefs
@@ -1252,11 +1274,12 @@ class NotificationService:
 
     async def _send_chat_notification(self, text: str, notify_type: str) -> None:
         if await self._chat_type_enabled(notify_type):
-            await self._bot.send_message(
-                chat_id=self._config.main_chat_id,
-                text=text,
-                parse_mode=ParseMode.HTML,
-            )
+            for chunk in chunk_message(text):
+                await self._bot.send_message(
+                    chat_id=self._config.main_chat_id,
+                    text=chunk,
+                    parse_mode=ParseMode.HTML,
+                )
 
     async def send_test_notification(self, notify_type: str) -> None:
         samples = {
@@ -1286,11 +1309,12 @@ class NotificationService:
                 if not _is_within_dm_window(prefs, self._config.timezone):
                     continue
                 try:
-                    await self._bot.send_message(
-                        chat_id=user.telegram_id,
-                        text=text,
-                        parse_mode=ParseMode.HTML,
-                    )
+                    for chunk in chunk_message(text):
+                        await self._bot.send_message(
+                            chat_id=user.telegram_id,
+                            text=chunk,
+                            parse_mode=ParseMode.HTML,
+                        )
                 except TelegramForbiddenError:
                     prefs["dm_enabled"] = False
                     user.notify_pref = prefs
@@ -1382,20 +1406,6 @@ def _resolve_war_sides(war_data: dict[str, Any], clan_tag: str) -> tuple[dict[st
     return clan, opponent
 
 
-def _build_missing_attacks_section(
-    war_data: dict[str, Any],
-    clan_tag: str,
-    title: str,
-) -> str | None:
-    clan, _ = _resolve_war_sides(war_data, clan_tag)
-    missed = collect_missed_attacks({**war_data, "clan": clan})
-    if not missed:
-        return None
-    table = build_missed_attacks_list(missed)
-    total = len(missed)
-    return f"{title}:\n{table}\nИтого: {total}"
-
-
 def _build_war_progress_snapshot(war_data: dict[str, Any], clan_tag: str) -> str:
     clan, opponent = _resolve_war_sides(war_data, clan_tag)
     clan_stars = clan.get("stars", 0)
@@ -1416,8 +1426,14 @@ def _build_war_progress_snapshot(war_data: dict[str, Any], clan_tag: str) -> str
         f"⚔️ Атаки: {attacks_used}/{total_attacks}",
     ]
     if missed:
-        lines.append("Кто не атаковал:")
-        lines.append(build_missed_attacks_list(missed))
+        lines.append("<b>Кто не атаковал:</b>")
+        for entry in missed:
+            name = html.escape(entry.get("name") or "Игрок")
+            th = entry.get("townhall")
+            used = entry.get("used", 0)
+            available = entry.get("available", 0)
+            label = f"{name} (TH{th})" if th else name
+            lines.append(f"• {label} — {used}/{available}")
     else:
         lines.append("Все атаки сделаны.")
     return "\n".join(lines)
