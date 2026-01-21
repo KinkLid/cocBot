@@ -27,7 +27,8 @@ from bot.utils.notification_events import (
 )
 from bot.utils.notify_time import format_duration_ru
 from bot.utils.war_attacks import build_missed_attacks_list, build_total_attacks_list, collect_missed_attacks
-from bot.utils.validators import normalize_tag
+from bot.utils.validators import normalize_player_name, normalize_tag
+from bot.utils.war_rules import get_war_start_time, is_rules_window_active
 
 logger = logging.getLogger(__name__)
 
@@ -89,14 +90,41 @@ def _format_coc_user(user: models.User | None) -> str | None:
     return name or tag or None
 
 
-def _format_claim_owner(user: models.User | None, external_name: str | None) -> str:
-    if external_name:
-        return external_name
+def _format_claim_owner(
+    user: models.User | None,
+    reserved_name: str | None,
+    reserved_tag: str | None,
+) -> str:
+    if reserved_name and reserved_tag:
+        return f"{reserved_name} ({reserved_tag})"
+    if reserved_name:
+        return reserved_name
+    if reserved_tag:
+        return reserved_tag
     tg_label = _format_tg_user(user)
     coc_label = _format_coc_user(user)
     if tg_label and coc_label:
         return f"{tg_label} / {coc_label}"
     return tg_label or coc_label or "неизвестно"
+
+
+def _is_claim_for_attacker(
+    claim_info: dict[str, Any] | None,
+    attacker_tag: str,
+    attacker_name: str | None,
+) -> bool:
+    if not claim_info:
+        return False
+    reserved_tag = claim_info.get("reserved_for_player_tag")
+    if reserved_tag and reserved_tag == attacker_tag:
+        return True
+    reserved_name = claim_info.get("reserved_for_player_name")
+    if reserved_name and normalize_player_name(reserved_name) == normalize_player_name(attacker_name):
+        return True
+    owner_tag = claim_info.get("owner_tag")
+    if owner_tag and owner_tag == attacker_tag:
+        return True
+    return False
 
 
 def _collect_attack_violations(
@@ -142,10 +170,12 @@ def _collect_attack_violations(
                 attack_order = attack.get("attackOrder", 0)
             claim_info = claims_by_position.get(defender_position)
             claim_violation = False
-            if claim_info:
-                owner_tag = claim_info.get("owner_tag")
-                if not owner_tag or owner_tag != attacker_tag:
-                    claim_violation = True
+            if claim_info and not _is_claim_for_attacker(
+                claim_info,
+                attacker_tag,
+                member.get("name"),
+            ):
+                claim_violation = True
             position_violation = defender_position > attacker_position + 10
             if not claim_violation and not position_violation:
                 continue
@@ -949,9 +979,9 @@ class NotificationService:
                     )
                 ).scalars().all()
                 claim_owner_ids = {
-                    claim.claimed_by_telegram_id
+                    claim.claimed_by_user_id
                     for claim in claims
-                    if claim.claimed_by_telegram_id
+                    if claim.claimed_by_user_id
                 }
                 claim_owners = {}
                 if claim_owner_ids:
@@ -965,19 +995,31 @@ class NotificationService:
                         .scalars()
                         .all()
                     }
+                rules_window_active = is_rules_window_active(
+                    get_war_start_time(war_data) or war_row.start_at
+                )
+                if not rules_window_active:
+                    return
                 for claim in claims:
                     owner_user = None
                     owner_tag = None
-                    if claim.claimed_by_telegram_id:
-                        owner_user = claim_owners.get(claim.claimed_by_telegram_id)
+                    if claim.claimed_by_user_id:
+                        owner_user = claim_owners.get(claim.claimed_by_user_id)
                         if owner_user and owner_user.player_tag:
                             owner_tag = normalize_tag(owner_user.player_tag)
+                    reserved_tag = normalize_tag(claim.reserved_for_player_tag) if claim.reserved_for_player_tag else None
+                    reserved_name = claim.reserved_for_player_name
                     claims_by_position[claim.enemy_position] = {
                         "owner_tag": owner_tag,
                         "owner_user": owner_user,
-                        "external_name": claim.external_player_name,
-                        "owner_telegram_id": claim.claimed_by_telegram_id,
+                        "reserved_for_player_name": reserved_name,
+                        "reserved_for_player_tag": reserved_tag,
+                        "owner_telegram_id": claim.claimed_by_user_id,
                     }
+            else:
+                rules_window_active = is_rules_window_active(get_war_start_time(war_data))
+                if not rules_window_active:
+                    return
 
             violations = _collect_attack_violations(
                 war_data,
@@ -1041,7 +1083,8 @@ class NotificationService:
                 if violation.get("claim_violation"):
                     claim_owner_label = _format_claim_owner(
                         claim_owner,
-                        claim_info.get("external_name"),
+                        claim_info.get("reserved_for_player_name"),
+                        claim_info.get("reserved_for_player_tag"),
                     )
                 reasons = []
                 if violation.get("position_violation"):

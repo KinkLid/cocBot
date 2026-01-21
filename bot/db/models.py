@@ -147,10 +147,14 @@ class TargetClaim(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     war_id: Mapped[int] = mapped_column(Integer, ForeignKey("wars.id"))
     enemy_position: Mapped[int] = mapped_column(Integer)
-    claimed_by_telegram_id: Mapped[Optional[int]] = mapped_column(
+    claimed_by_user_id: Mapped[Optional[int]] = mapped_column(
         BigInteger, ForeignKey("users.telegram_id")
     )
-    external_player_name: Mapped[Optional[str]] = mapped_column(String(64))
+    reserved_for_player_tag: Mapped[Optional[str]] = mapped_column(String(16))
+    reserved_for_player_name: Mapped[Optional[str]] = mapped_column(String(64))
+    reserved_by_admin_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_id")
+    )
     claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
     user: Mapped[User] = relationship("User", back_populates="target_claims")
