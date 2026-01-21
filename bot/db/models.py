@@ -53,7 +53,15 @@ class User(Base):
         "CapitalContribution", back_populates="user", cascade="all, delete-orphan"
     )
     target_claims: Mapped[list[TargetClaim]] = relationship(
-        "TargetClaim", back_populates="user", cascade="all, delete-orphan"
+        "TargetClaim",
+        back_populates="claimed_by_user",
+        foreign_keys="TargetClaim.claimed_by_user_id",
+        cascade="all, delete-orphan",
+    )
+    reserved_target_claims: Mapped[list[TargetClaim]] = relationship(
+        "TargetClaim",
+        back_populates="reserved_by_admin",
+        foreign_keys="TargetClaim.reserved_by_admin_id",
     )
 
 
@@ -157,7 +165,16 @@ class TargetClaim(Base):
     )
     claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
-    user: Mapped[User] = relationship("User", back_populates="target_claims")
+    claimed_by_user: Mapped[Optional[User]] = relationship(
+        "User",
+        back_populates="target_claims",
+        foreign_keys=[claimed_by_user_id],
+    )
+    reserved_by_admin: Mapped[Optional[User]] = relationship(
+        "User",
+        back_populates="reserved_target_claims",
+        foreign_keys=[reserved_by_admin_id],
+    )
 
     __table_args__ = (
         UniqueConstraint("war_id", "enemy_position", name="uq_target_claim"),
