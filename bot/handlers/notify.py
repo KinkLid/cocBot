@@ -24,7 +24,7 @@ from bot.services.hints import send_hint_once
 from bot.texts.hints import NOTIFY_HINT
 from bot.ui.labels import is_back, is_main_menu, label, label_variants
 from bot.utils.navigation import pop_menu, reset_menu, set_menu
-from bot.utils.notify_time import format_duration_ru, parse_delay_to_minutes
+from bot.utils.notify_time import format_duration_ru_seconds, parse_duration
 from bot.utils.state import reset_state_if_any
 from bot.utils.tables import build_pre_table
 from bot.utils.notification_rules import schedule_rule_for_active_event
@@ -95,7 +95,7 @@ def _rules_table(rows: list[models.NotificationRule]) -> str:
     table_rows: list[list[str]] = []
     for rule in rows:
         status = "ВКЛ" if rule.is_enabled else "ВЫКЛ"
-        delay_text = format_duration_ru(rule.delay_seconds // 60)
+        delay_text = format_duration_ru_seconds(rule.delay_seconds)
         custom = rule.custom_text or "—"
         table_rows.append([str(rule.id), delay_text, status, custom])
     return build_pre_table(
@@ -437,7 +437,7 @@ async def notify_rules_action(
     if message.text in label_variants("notify_add"):
         await state.set_state(NotifyState.rule_delay_value)
         await message.answer(
-            "Введите задержку от старта события (например, 1h, 30m, 0.1h).",
+            "Введите задержку, например: 17h 2m 34s (h — часы, m — минуты, s — секунды).",
             reply_markup=notify_rules_action_reply(),
         )
         return
@@ -487,11 +487,14 @@ async def notify_rule_delay_value(
         await state.set_state(NotifyState.rule_action)
         await message.answer("Выберите действие.", reply_markup=notify_rules_action_reply())
         return
-    delay_minutes = parse_delay_to_minutes(message.text or "")
-    if not delay_minutes:
-        await message.answer("Нужен формат 1h, 30m или 0.1h.", reply_markup=notify_rules_action_reply())
+    delay_seconds = parse_duration(message.text or "")
+    if not delay_seconds:
+        await message.answer(
+            "Нужен формат: 17h 2m 34s (h — часы, m — минуты, s — секунды).",
+            reply_markup=notify_rules_action_reply(),
+        )
         return
-    await state.update_data(rule_delay_minutes=delay_minutes)
+    await state.update_data(rule_delay_seconds=delay_seconds)
     await state.set_state(NotifyState.rule_text)
     await message.answer("Введите текст уведомления или '-' без текста.", reply_markup=notify_rules_action_reply())
 
@@ -512,8 +515,8 @@ async def notify_rule_text(
         return
     data = await state.get_data()
     event_type = data.get("rule_event_type")
-    delay_minutes = data.get("rule_delay_minutes")
-    if event_type not in EVENT_LABELS or not delay_minutes:
+    delay_seconds = data.get("rule_delay_seconds")
+    if event_type not in EVENT_LABELS or not delay_seconds:
         await state.clear()
         await notify_command(message, state, config, sessionmaker)
         return
@@ -524,7 +527,7 @@ async def notify_rule_text(
             scope="dm",
             user_id=message.from_user.id,
             event_type=event_type,
-            delay_seconds=int(delay_minutes * 60),
+            delay_seconds=delay_seconds,
             custom_text=custom_text,
             is_enabled=True,
         )
@@ -534,7 +537,7 @@ async def notify_rule_text(
         await session.commit()
     await state.set_state(NotifyState.rule_action)
     await message.answer(
-        f"Уведомление добавлено: через {format_duration_ru(delay_minutes)}.",
+        f"Уведомление добавлено: через {format_duration_ru_seconds(delay_seconds)}.",
         reply_markup=notify_rules_action_reply(),
     )
 
@@ -558,7 +561,7 @@ async def notify_rule_edit_id(
     await state.update_data(rule_edit_id=int(message.text))
     await state.set_state(NotifyState.rule_edit_delay)
     await message.answer(
-        "Введите новую задержку (1h, 30m) или '-' чтобы оставить.",
+        "Введите новую задержку (17h 2m, 90m 10s) или '-' чтобы оставить.",
         reply_markup=notify_rules_action_reply(),
     )
 
@@ -577,13 +580,16 @@ async def notify_rule_edit_delay(
         await message.answer("Выберите действие.", reply_markup=notify_rules_action_reply())
         return
     text = (message.text or "").strip()
-    delay_minutes = None
+    delay_seconds = None
     if text != "-":
-        delay_minutes = parse_delay_to_minutes(text)
-        if not delay_minutes:
-            await message.answer("Нужен формат 1h, 30m или '-'.", reply_markup=notify_rules_action_reply())
+        delay_seconds = parse_duration(text)
+        if not delay_seconds:
+            await message.answer(
+                "Нужен формат: 17h 2m 34s или '-'.",
+                reply_markup=notify_rules_action_reply(),
+            )
             return
-    await state.update_data(rule_edit_delay=delay_minutes)
+    await state.update_data(rule_edit_delay=delay_seconds)
     await state.set_state(NotifyState.rule_edit_text)
     await message.answer(
         "Введите новый текст или '-' чтобы оставить.",
@@ -628,7 +634,7 @@ async def notify_rule_edit_text(
             await state.set_state(NotifyState.rule_action)
             return
         if new_delay is not None:
-            rule.delay_seconds = int(new_delay * 60)
+            rule.delay_seconds = new_delay
         if custom_text is not None:
             rule.custom_text = custom_text
         await session.commit()

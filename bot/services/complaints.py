@@ -11,6 +11,7 @@ from aiogram.enums import ParseMode
 from bot.config import BotConfig
 from bot.db import models
 from bot.keyboards.complaints import complaint_admin_kb
+from bot.ui.renderers import chunk_message
 
 logger = logging.getLogger(__name__)
 
@@ -34,20 +35,20 @@ def build_complaint_message(complaint: models.Complaint, timezone_name: str) -> 
 
     lines = [f"<b>{header}</b>"]
     if complaint.created_by_tg_id:
-        lines.append(f"Кто пожаловался: {created_by_name} (ID {complaint.created_by_tg_id})")
+        lines.append(
+            f"<b>Кто:</b> {created_by_name} <code>{complaint.created_by_tg_id}</code>"
+        )
     else:
-        lines.append(f"Источник: {created_by_name}")
-    lines.append(f"На кого: {target_name} ({target_tag})")
-    lines.append(f"Дата: {created_at}")
+        lines.append(f"<b>Источник:</b> {created_by_name}")
+    target_tag_text = f"<code>{target_tag}</code>" if target_tag else ""
+    lines.append(f"<b>На кого:</b> {target_name} {target_tag_text}".strip())
+    lines.append(f"<b>Дата:</b> {created_at}")
+    lines.append("<b>Текст:</b>")
     if message_text:
-        lines.append("Текст:")
         for entry in message_text.splitlines():
-            if entry.strip():
-                lines.append(f"• {entry}")
-            else:
-                lines.append("•")
+            lines.append(f"• {entry}" if entry.strip() else "• —")
     else:
-        lines.append("Текст: —")
+        lines.append("• —")
     return "\n".join(lines)
 
 
@@ -61,24 +62,26 @@ async def notify_admins_complaint(
     dm_count = 0
     for admin_id in config.admin_telegram_ids:
         try:
-            await bot.send_message(
-                chat_id=admin_id,
-                text=text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=markup,
-            )
+            for index, chunk in enumerate(chunk_message(text)):
+                await bot.send_message(
+                    chat_id=admin_id,
+                    text=chunk,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=markup if index == 0 else None,
+                )
             dm_count += 1
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to send complaint %s to admin %s: %s", complaint.id, admin_id, exc)
     admin_chat_used = False
     if config.admin_chat_id and config.admin_chat_id != config.main_chat_id:
         try:
-            await bot.send_message(
-                chat_id=config.admin_chat_id,
-                text=text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=markup,
-            )
+            for index, chunk in enumerate(chunk_message(text)):
+                await bot.send_message(
+                    chat_id=config.admin_chat_id,
+                    text=chunk,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=markup if index == 0 else None,
+                )
             admin_chat_used = True
         except Exception as exc:  # noqa: BLE001
             logger.warning(
