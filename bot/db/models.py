@@ -262,8 +262,12 @@ class NotificationInstance(Base):
     event_id: Mapped[str] = mapped_column(String(64))
     fire_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(16), default="pending")
+    sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[Optional[str]] = mapped_column(Text)
     payload: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+    __table_args__ = (UniqueConstraint("rule_id", "event_id", name="uq_notification_instance_rule_event"),)
 
 
 class Complaint(Base):

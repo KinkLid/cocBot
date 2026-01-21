@@ -160,29 +160,23 @@ def _safe_text(value: str | None) -> str:
     return value.replace("`", "'").replace("\n", " ").replace("|", "/").strip()
 
 
-def _truncate(value: str, max_len: int) -> str:
-    if len(value) <= max_len:
-        return value
-    if max_len <= 1:
-        return value[:max_len]
-    return f"{value[: max_len - 1]}…"
-
-
 def _build_table_lines(
     enemies: list[dict],
     claims: list[models.TargetClaim],
     user_map: dict[int, models.User],
 ) -> list[str]:
     claims_map = {claim.enemy_position: claim for claim in claims}
-    rows: list[tuple[str, str, str, str]] = []
-    for enemy in _sorted_enemies(enemies):
+    rows: list[str] = []
+    free_positions: list[str] = []
+    for index, enemy in enumerate(_sorted_enemies(enemies), start=1):
         pos = str(enemy.get("mapPosition") or "?")
         name = _safe_text(enemy.get("name"))
         th = enemy.get("townhallLevel")
         enemy_label = f"{name} TH{th}" if th else name
         claim = claims_map.get(enemy.get("mapPosition"))
         if not claim:
-            rows.append((pos, enemy_label, "свободно", "-"))
+            free_positions.append(pos)
+            rows.append(f"{index}) #{pos} — {enemy_label} — свободно")
             continue
         if claim.external_player_name:
             holder = _safe_text(claim.external_player_name)
@@ -195,46 +189,17 @@ def _build_table_lines(
                 holder = "участник"
         else:
             holder = "участник"
-        rows.append((pos, enemy_label, "занято", holder))
+        rows.append(f"{index}) #{pos} — {enemy_label} — занято: {holder}")
 
     if not rows:
         return ["Нет противников для отображения."]
 
-    headers = ("№", "Противник", "Статус", "Кем занято")
-    widths = [
-        max(len(headers[0]), max(len(row[0]) for row in rows)),
-        max(len(headers[1]), max(len(row[1]) for row in rows)),
-        max(len(headers[2]), max(len(row[2]) for row in rows)),
-        max(len(headers[3]), max(len(row[3]) for row in rows)),
-    ]
-    max_widths = [4, 22, 10, 22]
-    widths = [min(widths[index], max_widths[index]) for index in range(len(widths))]
-
-    lines = [
-        "Таблица целей",
-        "",
-        " | ".join(
-            [
-                headers[0].ljust(widths[0]),
-                headers[1].ljust(widths[1]),
-                headers[2].ljust(widths[2]),
-                headers[3].ljust(widths[3]),
-            ]
-        ),
-        "-+-".join(["-" * width for width in widths]),
-    ]
-    for row in rows:
-        lines.append(
-            " | ".join(
-                [
-                    _truncate(row[0], widths[0]).ljust(widths[0]),
-                    _truncate(row[1], widths[1]).ljust(widths[1]),
-                    _truncate(row[2], widths[2]).ljust(widths[2]),
-                    _truncate(row[3], widths[3]).ljust(widths[3]),
-                ]
-            )
-        )
-    return [html.escape(line) for line in lines]
+    lines = ["<b>🎯 Цели на войне</b>"]
+    lines.extend([html.escape(line) for line in rows])
+    if free_positions:
+        free_list = ", ".join(f"#{pos}" for pos in free_positions)
+        lines.extend(["", f"Свободные: {html.escape(free_list)}"])
+    return lines
 
 
 def _chunk_lines(lines: list[str], max_chars: int = 3400) -> list[list[str]]:
@@ -266,8 +231,8 @@ async def _build_table_messages(
     if lines and lines[0].startswith("Нет"):
         return ["\n".join(lines)]
 
-    header_lines = lines[:4]
-    data_lines = lines[4:]
+    header_lines = lines[:1]
+    data_lines = lines[1:]
     chunks: list[list[str]] = []
     if not data_lines:
         chunks = [lines]
@@ -498,18 +463,11 @@ async def targets_table_button(
     table_chunks = await _build_table_messages(enemies, claims, sessionmaker)
     reply_markup = _menu_reply(config, message.from_user.id)
     for index, chunk in enumerate(table_chunks):
-        try:
-            await message.answer(
-                f"<pre>{chunk}</pre>",
-                reply_markup=reply_markup if index == 0 else None,
-                parse_mode=ParseMode.HTML,
-            )
-        except TelegramBadRequest as exc:
-            logger.warning("Failed to send targets table, falling back: %s", exc)
-            await message.answer(
-                chunk,
-                reply_markup=reply_markup if index == 0 else None,
-            )
+        await message.answer(
+            chunk,
+            reply_markup=reply_markup if index == 0 else None,
+            parse_mode=ParseMode.HTML,
+        )
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("targets:claim:"))

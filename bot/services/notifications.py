@@ -11,6 +11,7 @@ from aiogram import Bot
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramForbiddenError
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bot.config import BotConfig
@@ -19,8 +20,13 @@ from bot.services.coc_client import CocClient
 from bot.services.complaints import notify_admins_complaint
 from bot.ui.labels import label
 from bot.utils.coc_time import parse_coc_time
+from bot.utils.notification_events import (
+    build_capital_event_key,
+    build_cwl_event_key,
+    build_war_event_key,
+)
 from bot.utils.notify_time import format_duration_ru
-from bot.utils.war_attacks import build_missed_attacks_table, build_total_attacks_table, collect_missed_attacks
+from bot.utils.war_attacks import build_missed_attacks_list, build_total_attacks_list, collect_missed_attacks
 from bot.utils.validators import normalize_tag
 
 logger = logging.getLogger(__name__)
@@ -303,6 +309,7 @@ class NotificationService:
             return
         state = war_data.get("state", "unknown")
         war_tag = war_data.get("tag") or war_data.get("clan", {}).get("tag")
+        event_key = build_war_event_key(war_data, self._config.clan_tag)
         start_at = parse_coc_time(war_data.get("startTime"))
         end_at = parse_coc_time(war_data.get("endTime"))
         async with self._sessionmaker() as session:
@@ -362,7 +369,7 @@ class NotificationService:
             if state in {"preparation", "inWar"} and previous_state not in {"preparation", "inWar"}:
                 await self._schedule_rule_instances(
                     event_type="war",
-                    event_id=war_tag,
+                    event_id=event_key,
                     start_at=start_at,
                 )
             await self._notify_war_state(state, war_data)
@@ -372,8 +379,8 @@ class NotificationService:
                     .where(models.WarState.war_tag == war_tag)
                     .values(last_notified_state=state, updated_at=datetime.now(timezone.utc))
                 )
-                if state == "warEnded" and war_tag:
-                    await self._cancel_rule_instances(session, war_tag)
+                if state == "warEnded" and event_key:
+                    await self._cancel_rule_instances(session, event_key)
                 await session.execute(
                     update(models.ScheduledNotification)
                     .where(models.ScheduledNotification.category == "war")
@@ -462,7 +469,7 @@ class NotificationService:
         if not items:
             return
         latest = items[0]
-        raid_id = latest.get("startTime") or latest.get("endTime") or "raid"
+        raid_id = build_capital_event_key(latest) or "raid"
         start_at = parse_coc_time(latest.get("startTime"))
         end_at = parse_coc_time(latest.get("endTime"))
         now = datetime.now(timezone.utc)
@@ -614,6 +621,7 @@ class NotificationService:
 
     async def _sync_cwl_war(self, war: dict[str, Any], season: str) -> None:
         war_tag = war.get("tag")
+        event_key = build_cwl_event_key(war)
         if not war_tag:
             return
         state = war.get("state", "unknown")
@@ -640,7 +648,7 @@ class NotificationService:
             if state in {"preparation", "inWar"}:
                 if war_state.last_notified_state not in {"preparation", "inWar"}:
                     start_at = parse_coc_time(war.get("startTime"))
-                    await self._schedule_rule_instances("cwl", war_tag, start_at)
+                    await self._schedule_rule_instances("cwl", event_key or war_tag, start_at)
                 text = self._format_cwl_start(war)
                 await self._send_event(text, "cwl_round_start")
             else:
@@ -653,7 +661,7 @@ class NotificationService:
                     .values(last_notified_state=state, updated_at=datetime.now(timezone.utc))
                 )
                 if state == "warEnded":
-                    await self._cancel_rule_instances(session, war_tag)
+                    await self._cancel_rule_instances(session, event_key or war_tag)
                 await session.commit()
 
     async def _find_current_cwl_war(self, league: dict[str, Any]) -> dict[str, Any] | None:
@@ -771,7 +779,11 @@ class NotificationService:
                         payload={},
                     )
                 )
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                logger.info("Skipped duplicate rule instances for event %s: %s", event_id, exc)
+                await session.rollback()
 
     async def _dispatch_rule_instances(
         self,
@@ -806,9 +818,12 @@ class NotificationService:
                         parse_mode=ParseMode.HTML,
                     )
                 instance.status = "sent"
+                instance.sent_at = now
+                instance.last_error = None
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Failed to send rule instance %s: %s", instance.id, exc)
                 instance.status = "failed"
+                instance.last_error = str(exc)
 
     async def _cancel_rule_instances(self, session, event_id: str) -> None:
         await session.execute(
@@ -881,7 +896,7 @@ class NotificationService:
         description = html.escape(rule.custom_text or "")
         if rule.event_type == "war":
             war_data = await self._coc.get_current_war(self._config.clan_tag)
-            current_event_id = war_data.get("tag") or war_data.get("clan", {}).get("tag")
+            current_event_id = build_war_event_key(war_data, self._config.clan_tag)
             if instance.event_id and current_event_id != instance.event_id:
                 return None
             opponent = html.escape(war_data.get("opponent", {}).get("name") or "противник")
@@ -904,7 +919,7 @@ class NotificationService:
             if not items:
                 return None
             latest = items[0]
-            raid_id = latest.get("startTime") or latest.get("endTime") or "raid"
+            raid_id = build_capital_event_key(latest) or "raid"
             if instance.event_id and raid_id != instance.event_id:
                 return None
             header = "⏰ Напоминание по столице"
@@ -1128,7 +1143,7 @@ class NotificationService:
                     "missed": missed,
                 }
             )
-        return build_total_attacks_table(rows)
+        return build_total_attacks_list(rows)
 
     def _format_cwl_start(self, war: dict[str, Any]) -> str:
         opponent = html.escape(war.get("opponent", {}).get("name") or "противник")
@@ -1333,8 +1348,9 @@ def _build_missing_attacks_section(
     missed = collect_missed_attacks({**war_data, "clan": clan})
     if not missed:
         return None
-    table = build_missed_attacks_table(missed)
-    return f"{title}:\n{table}"
+    table = build_missed_attacks_list(missed)
+    total = len(missed)
+    return f"{title}:\n{table}\nИтого: {total}"
 
 
 def _build_war_progress_snapshot(war_data: dict[str, Any], clan_tag: str) -> str:
@@ -1358,7 +1374,7 @@ def _build_war_progress_snapshot(war_data: dict[str, Any], clan_tag: str) -> str
     ]
     if missed:
         lines.append("Кто не атаковал:")
-        lines.append(build_missed_attacks_table(missed))
+        lines.append(build_missed_attacks_list(missed))
     else:
         lines.append("Все атаки сделаны.")
     return "\n".join(lines)
@@ -1401,7 +1417,7 @@ def _build_war_snapshot(war_data: dict[str, Any]) -> str:
     ]
     if missing:
         lines.append("Не атаковали:")
-        lines.append("<pre>{}</pre>".format("\n".join(missing)))
+        lines.extend([f"• {entry}" for entry in missing])
     else:
         lines.append("Все атаки сделаны.")
     return "\n".join(lines)
@@ -1427,7 +1443,7 @@ def _build_capital_snapshot(raid: dict[str, Any]) -> str:
     ]
     if missing:
         lines.append("Не добили атаки:")
-        lines.append("<pre>{}</pre>".format("\n".join(missing)))
+        lines.extend([f"• {entry}" for entry in missing])
     else:
         lines.append("Все атаки сделаны.")
     return "\n".join(lines)
