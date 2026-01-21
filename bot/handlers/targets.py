@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import html
 import logging
-from datetime import datetime, timedelta, timezone
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
@@ -26,8 +25,8 @@ from bot.texts.hints import TARGETS_HINT
 from bot.ui.labels import admin_unclaim_label, is_back, is_main_menu, label, label_variants
 from bot.utils.navigation import reset_menu
 from bot.utils.state import reset_state_if_any
-from bot.utils.coc_time import parse_coc_time
-from bot.utils.validators import normalize_tag
+from bot.utils.validators import is_valid_tag, normalize_player_name, normalize_tag
+from bot.utils.war_rules import get_war_start_time, is_rules_window_active
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -89,11 +88,42 @@ def _resolve_member_position(war: dict, player_tag: str | None) -> int | None:
 
 
 def _is_position_limit_active(war: dict) -> bool:
-    start_time = parse_coc_time(war.get("startTime"))
-    if not start_time:
-        return False
-    now = datetime.now(timezone.utc)
-    return now - start_time <= timedelta(hours=12)
+    start_time = get_war_start_time(war)
+    return is_rules_window_active(start_time)
+
+
+def _format_reserved_label(name: str | None, tag: str | None) -> str | None:
+    if name and tag:
+        return f"{name} ({tag})"
+    return name or tag
+
+
+def _find_member_by_name(war: dict, name: str) -> tuple[dict | None, bool]:
+    normalized_target = normalize_player_name(name)
+    if not normalized_target:
+        return None, False
+    members = war.get("clan", {}).get("members", [])
+    matches = [
+        member
+        for member in members
+        if normalize_player_name(member.get("name")) == normalized_target
+    ]
+    if len(matches) == 1:
+        return matches[0], False
+    if len(matches) > 1:
+        return None, True
+    return None, False
+
+
+def _find_member_by_tag(war: dict, tag: str) -> dict | None:
+    normalized_tag = _normalize_member_tag(tag)
+    if not normalized_tag:
+        return None
+    members = war.get("clan", {}).get("members", [])
+    for member in members:
+        if _normalize_member_tag(member.get("tag")) == normalized_tag:
+            return member
+    return None
 
 
 def _is_target_position_allowed(war: dict, user: models.User, target_position: int) -> bool:
@@ -178,10 +208,14 @@ def _build_table_lines(
             free_positions.append(pos)
             rows.append(f"{index}) #{pos} — {enemy_label} — свободно")
             continue
-        if claim.external_player_name:
-            holder = _safe_text(claim.external_player_name)
-        elif claim.claimed_by_telegram_id:
-            user = user_map.get(claim.claimed_by_telegram_id)
+        reserved_label = _format_reserved_label(
+            claim.reserved_for_player_name,
+            claim.reserved_for_player_tag,
+        )
+        if reserved_label:
+            holder = _safe_text(reserved_label)
+        elif claim.claimed_by_user_id:
+            user = user_map.get(claim.claimed_by_user_id)
             if user:
                 tg_name = f"@{user.username}" if user.username else user.player_name
                 holder = _safe_text(f"{tg_name} / {user.player_name}")
@@ -253,8 +287,8 @@ async def _build_selection_markup(
 ) -> InlineKeyboardMarkup:
     enemies = _sorted_enemies(war.get("opponent", {}).get("members", []))
     claims = await _load_claims(sessionmaker, war_row.id)
-    taken = {claim.enemy_position for claim in claims if claim.claimed_by_telegram_id != user.telegram_id}
-    my_claims = {claim.enemy_position for claim in claims if claim.claimed_by_telegram_id == user.telegram_id}
+    taken = {claim.enemy_position for claim in claims if claim.claimed_by_user_id != user.telegram_id}
+    my_claims = {claim.enemy_position for claim in claims if claim.claimed_by_user_id == user.telegram_id}
     if _is_position_limit_active(war):
         max_position = None
         member_position = _resolve_member_position(war, user.player_tag)
@@ -270,11 +304,17 @@ async def _build_selection_markup(
     admin_rows: list[tuple[str, str]] = []
     if admin_mode:
         for claim in claims:
-            if claim.claimed_by_telegram_id == user.telegram_id:
+            if claim.claimed_by_user_id == user.telegram_id:
                 continue
             admin_rows.append(
                 (
-                    admin_unclaim_label(claim.enemy_position, claim.external_player_name),
+                    admin_unclaim_label(
+                        claim.enemy_position,
+                        _format_reserved_label(
+                            claim.reserved_for_player_name,
+                            claim.reserved_for_player_tag,
+                        ),
+                    ),
                     f"targets:admin-unclaim:{claim.enemy_position}",
                 )
             )
@@ -540,18 +580,22 @@ async def target_claim(
                 )
             ).scalar_one_or_none()
             if existing:
-                if existing.claimed_by_telegram_id == user_id:
+                if existing.claimed_by_user_id == user_id:
                     await session.delete(existing)
                     result_action = "unclaimed"
                 else:
                     holder = "другим игроком"
-                    if existing.external_player_name:
-                        holder = existing.external_player_name
-                    elif existing.claimed_by_telegram_id:
+                    reserved_label = _format_reserved_label(
+                        existing.reserved_for_player_name,
+                        existing.reserved_for_player_tag,
+                    )
+                    if reserved_label:
+                        holder = reserved_label
+                    elif existing.claimed_by_user_id:
                         holder_user = (
                             await session.execute(
                                 select(models.User).where(
-                                    models.User.telegram_id == existing.claimed_by_telegram_id
+                                    models.User.telegram_id == existing.claimed_by_user_id
                                 )
                             )
                         ).scalar_one_or_none()
@@ -583,10 +627,10 @@ async def target_claim(
                     await session.execute(
                         select(func.count()).select_from(models.TargetClaim).where(
                             models.TargetClaim.war_id == war_row.id,
-                            models.TargetClaim.claimed_by_telegram_id == user_id,
-                        )
+                        models.TargetClaim.claimed_by_user_id == user_id,
                     )
-                ).scalar_one()
+                )
+            ).scalar_one()
                 if claim_count >= 2:
                     await callback.message.answer("Можно выбрать не более двух целей.")
                     await _refresh_selection(
@@ -602,7 +646,9 @@ async def target_claim(
                     models.TargetClaim(
                         war_id=war_row.id,
                         enemy_position=position,
-                        claimed_by_telegram_id=user_id,
+                        claimed_by_user_id=user_id,
+                        reserved_for_player_tag=_normalize_member_tag(user.player_tag),
+                        reserved_for_player_name=user.player_name,
                     )
                 )
                 result_action = "claimed"
@@ -715,7 +761,7 @@ async def target_toggle(
                     select(models.TargetClaim).where(
                         models.TargetClaim.war_id == war_row.id,
                         models.TargetClaim.enemy_position == position,
-                        models.TargetClaim.claimed_by_telegram_id == user_id,
+                        models.TargetClaim.claimed_by_user_id == user_id,
                     )
                 )
             ).scalar_one_or_none()
@@ -946,8 +992,8 @@ async def targets_assign_name(
         await state.clear()
         await message.answer("Не удалось определить цель. Повторите.")
         return
-    name = (message.text or "").strip()
-    if not name:
+    input_text = (message.text or "").strip()
+    if not input_text:
         await message.answer("Введите ник игрока.")
         return
     war = await _load_war(coc_client, config.clan_tag)
@@ -965,6 +1011,26 @@ async def targets_assign_name(
         )
         return
     war_row = await _ensure_war_row(sessionmaker, war)
+    warning_text = None
+    reserved_tag = None
+    reserved_name = input_text
+    normalized_tag = normalize_tag(input_text)
+    if is_valid_tag(normalized_tag):
+        reserved_tag = normalized_tag
+        member = _find_member_by_tag(war, normalized_tag)
+        if member:
+            reserved_name = member.get("name", input_text)
+        else:
+            warning_text = "Тег не найден в составе войны. Лучше указывать точный тег участника."
+    else:
+        member, ambiguous = _find_member_by_name(war, input_text)
+        if member:
+            reserved_tag = _normalize_member_tag(member.get("tag"))
+            reserved_name = member.get("name", input_text)
+        elif ambiguous:
+            warning_text = "Ник совпадает у нескольких игроков. Лучше указывать точный тег."
+        else:
+            warning_text = "Игрок не найден по нику. Лучше указывать точный тег."
     try:
         async with sessionmaker() as session:
             try:
@@ -973,8 +1039,10 @@ async def targets_assign_name(
                         models.TargetClaim(
                             war_id=war_row.id,
                             enemy_position=position,
-                            claimed_by_telegram_id=None,
-                            external_player_name=name,
+                            claimed_by_user_id=None,
+                            reserved_for_player_tag=reserved_tag,
+                            reserved_for_player_name=reserved_name,
+                            reserved_by_admin_id=message.from_user.id,
                         )
                     )
             except IntegrityError:
@@ -1006,7 +1074,10 @@ async def targets_assign_name(
         await state.clear()
         return
     await state.clear()
+    response_lines = [f"Назначено: цель #{position} за {reserved_name}."]
+    if warning_text:
+        response_lines.append(warning_text)
     await message.answer(
-        f"Назначено: цель #{position} за {name}.",
+        "\n".join(response_lines),
         reply_markup=_menu_reply(config, message.from_user.id),
     )

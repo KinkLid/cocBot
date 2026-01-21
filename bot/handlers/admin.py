@@ -1677,7 +1677,7 @@ async def wipe_target(
             return
 
         await session.execute(
-            delete(models.TargetClaim).where(models.TargetClaim.claimed_by_telegram_id == user.telegram_id)
+            delete(models.TargetClaim).where(models.TargetClaim.claimed_by_user_id == user.telegram_id)
         )
         await session.execute(
             delete(models.WarParticipation).where(models.WarParticipation.telegram_id == user.telegram_id)

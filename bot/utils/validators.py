@@ -13,5 +13,11 @@ def normalize_tag(tag: str) -> str:
     return tag
 
 
+def normalize_player_name(name: str | None) -> str | None:
+    if not name:
+        return None
+    return name.strip().casefold()
+
+
 def is_valid_tag(tag: str) -> bool:
     return bool(TAG_PATTERN.match(tag))
