@@ -9,8 +9,8 @@ from zoneinfo import ZoneInfo
 
 from aiogram import Bot
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramForbiddenError
-from sqlalchemy import select, update
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -393,6 +393,9 @@ class NotificationService:
             war_state.updated_at = datetime.now(timezone.utc)
             await session.commit()
 
+        if state in {"preparation", "inWar"} and event_key:
+            await self._update_target_event_context("war", event_key)
+
         if state in {"inWar", "warEnded"}:
             await self._process_war_attack_warnings(war_data)
 
@@ -423,7 +426,7 @@ class NotificationService:
     async def dispatch_scheduled_notifications(self) -> None:
         now = datetime.now(timezone.utc)
         async with self._sessionmaker() as session:
-            await self._dispatch_rule_instances(session, now)
+            due_instances = await self._dispatch_rule_instances(session, now)
             reminders = (
                 await session.execute(
                     select(models.ScheduledNotification)
@@ -431,9 +434,22 @@ class NotificationService:
                     .where(models.ScheduledNotification.fire_at <= now)
                 )
             ).scalars().all()
+            logger.info(
+                "Notification scheduler tick: due_rule_instances=%s due_scheduled=%s",
+                len(due_instances),
+                len(reminders),
+            )
             if not reminders:
+                await session.commit()
                 return
             for reminder in reminders:
+                logger.info(
+                    "Scheduled notification due (id=%s event_type=%s fire_at=%s status=%s)",
+                    reminder.id,
+                    reminder.event_type,
+                    reminder.fire_at,
+                    reminder.status,
+                )
                 try:
                     text = await self._build_reminder_message(reminder)
                     if text:
@@ -659,6 +675,8 @@ class NotificationService:
         if not war_tag:
             return
         state = war.get("state", "unknown")
+        if state in {"preparation", "inWar"} and event_key:
+            await self._update_target_event_context("cwl_war", event_key)
         async with self._sessionmaker() as session:
             war_state = (
                 await session.execute(select(models.CwlWarState).where(models.CwlWarState.war_tag == war_tag))
@@ -683,6 +701,8 @@ class NotificationService:
                 if war_state.last_notified_state not in {"preparation", "inWar"}:
                     start_at = parse_coc_time(war.get("startTime"))
                     await self._schedule_rule_instances("cwl", event_key or war_tag, start_at)
+                    if event_key:
+                        await self._update_target_event_context("cwl_war", event_key)
                 text = self._format_cwl_start(war)
                 await self._send_event(text, "cwl_round_start")
             else:
@@ -828,7 +848,7 @@ class NotificationService:
         self,
         session,
         now: datetime,
-    ) -> None:
+    ) -> list[models.NotificationInstance]:
         instances = (
             await session.execute(
                 select(models.NotificationInstance, models.NotificationRule)
@@ -838,8 +858,16 @@ class NotificationService:
             )
         ).all()
         if not instances:
-            return
+            return []
         for instance, rule in instances:
+            logger.info(
+                "Notification due (instance_id=%s rule_id=%s event_id=%s fire_at=%s status=%s)",
+                instance.id,
+                instance.rule_id,
+                instance.event_id,
+                instance.fire_at,
+                instance.status,
+            )
             if not rule.is_enabled:
                 instance.status = "canceled"
                 continue
@@ -859,10 +887,20 @@ class NotificationService:
                 instance.status = "sent"
                 instance.sent_at = now
                 instance.last_error = None
+            except (TelegramForbiddenError, TelegramBadRequest) as exc:
+                logger.warning(
+                    "Failed to send rule instance %s (tg_error=%s): %s",
+                    instance.id,
+                    type(exc).__name__,
+                    exc,
+                )
+                instance.status = "failed"
+                instance.last_error = str(exc)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Failed to send rule instance %s: %s", instance.id, exc)
                 instance.status = "failed"
                 instance.last_error = str(exc)
+        return [instance for instance, _ in instances]
 
     async def _cancel_rule_instances(self, session, event_id: str) -> None:
         await session.execute(
@@ -975,6 +1013,7 @@ class NotificationService:
 
     async def _process_war_attack_warnings(self, war_data: dict[str, Any]) -> None:
         war_tag = war_data.get("tag") or war_data.get("clan", {}).get("tag") or self._config.clan_tag
+        event_key = build_war_event_key(war_data, self._config.clan_tag)
         created: list[tuple[models.Complaint, dict[str, Any]]] = []
         async with self._sessionmaker() as session:
             war_row = (
@@ -983,11 +1022,20 @@ class NotificationService:
             claims_by_position: dict[int, dict[str, Any]] = {}
             claim_owner_ids: set[int] = set()
             if war_row:
-                claims = (
-                    await session.execute(
-                        select(models.TargetClaim).where(models.TargetClaim.war_id == war_row.id)
-                    )
-                ).scalars().all()
+                if event_key:
+                    claims = (
+                        await session.execute(
+                            select(models.TargetClaim)
+                            .where(models.TargetClaim.event_type == "war")
+                            .where(models.TargetClaim.event_key == event_key)
+                        )
+                    ).scalars().all()
+                else:
+                    claims = (
+                        await session.execute(
+                            select(models.TargetClaim).where(models.TargetClaim.war_id == war_row.id)
+                        )
+                    ).scalars().all()
                 claim_owner_ids = {
                     claim.claimed_by_user_id
                     for claim in claims
@@ -1320,6 +1368,49 @@ class NotificationService:
                     user.notify_pref = prefs
                     await session.commit()
                     logger.info("Disabled DM notifications for telegram_id=%s", user.telegram_id)
+
+    async def _update_target_event_context(self, event_type: str, event_key: str) -> None:
+        now = datetime.now(timezone.utc)
+        async with self._sessionmaker() as session:
+            context = (
+                await session.execute(
+                    select(models.WarEventContext).where(models.WarEventContext.event_type == event_type)
+                )
+            ).scalar_one_or_none()
+            previous_key = context.event_key if context else None
+            if not context:
+                context = models.WarEventContext(
+                    event_type=event_type,
+                    event_key=event_key,
+                    updated_at=now,
+                )
+                session.add(context)
+            elif context.event_key != event_key:
+                context.event_key = event_key
+                context.updated_at = now
+            if previous_key and previous_key != event_key:
+                await session.execute(
+                    delete(models.TargetClaim)
+                    .where(models.TargetClaim.event_type == event_type)
+                    .where(models.TargetClaim.event_key == previous_key)
+                )
+                logger.info(
+                    "New war detected, resetting targets context (event_type=%s old_event_key=%s new_event_key=%s)",
+                    event_type,
+                    previous_key,
+                    event_key,
+                )
+            await session.commit()
+
+    async def cleanup_old_target_claims(self, max_age_days: int = 60) -> None:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+        async with self._sessionmaker() as session:
+            result = await session.execute(
+                delete(models.TargetClaim).where(models.TargetClaim.claimed_at < cutoff)
+            )
+            if result.rowcount:
+                logger.info("Removed %s old target claims (cutoff=%s)", result.rowcount, cutoff)
+            await session.commit()
 
     async def _chat_type_enabled(self, notify_type: str) -> bool:
         category_key = EVENT_CATEGORY_MAP.get(notify_type)

@@ -154,6 +154,8 @@ class TargetClaim(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     war_id: Mapped[int] = mapped_column(Integer, ForeignKey("wars.id"))
+    event_type: Mapped[str] = mapped_column(String(16))
+    event_key: Mapped[str] = mapped_column(String(64))
     enemy_position: Mapped[int] = mapped_column(Integer)
     claimed_by_user_id: Mapped[Optional[int]] = mapped_column(
         BigInteger, ForeignKey("users.telegram_id")
@@ -177,7 +179,8 @@ class TargetClaim(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint("war_id", "enemy_position", name="uq_target_claim"),
+        UniqueConstraint("event_type", "event_key", "enemy_position", name="uq_target_claim"),
+        Index("idx_target_claim_event", "event_type", "event_key"),
         Index("idx_target_claim_war", "war_id"),
     )
 
@@ -211,6 +214,14 @@ class WarReminder(Base):
     created_by: Mapped[int] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     status: Mapped[str] = mapped_column(String(16), default="pending")
+
+
+class WarEventContext(Base):
+    __tablename__ = "war_event_contexts"
+
+    event_type: Mapped[str] = mapped_column(String(16), primary_key=True)
+    event_key: Mapped[Optional[str]] = mapped_column(String(64))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
 
 class CwlState(Base):
