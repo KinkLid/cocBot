@@ -24,6 +24,7 @@ from bot.texts.hints import TARGETS_HINT
 from bot.ui.labels import admin_unclaim_label, is_back, is_main_menu, label, label_variants
 from bot.ui.renderers import render_targets_table
 from bot.utils.navigation import reset_menu
+from bot.utils.notification_events import build_war_event_key
 from bot.utils.state import reset_state_if_any
 from bot.utils.validators import is_valid_tag, normalize_player_name, normalize_tag
 from bot.utils.war_rules import get_war_start_time, is_rules_window_active
@@ -54,6 +55,13 @@ async def _load_war(coc_client: CocClient, clan_tag: str) -> dict | None:
 
 def _is_active_war_state(state: str | None) -> bool:
     return state in {"preparation", "inWar"}
+
+
+def _resolve_war_event(war: dict, clan_tag: str) -> tuple[str, str | None]:
+    war_type = (war.get("warType") or "").lower()
+    event_type = "cwl_war" if war_type == "cwl" else "war"
+    event_key = build_war_event_key(war, clan_tag)
+    return event_type, event_key
 
 
 def _normalize_member_tag(tag: str | None) -> str | None:
@@ -170,10 +178,21 @@ async def _ensure_war_row(sessionmaker: async_sessionmaker, war: dict) -> models
         return war_row
 
 
-async def _load_claims(sessionmaker: async_sessionmaker, war_id: int) -> list[models.TargetClaim]:
+async def _load_claims(
+    sessionmaker: async_sessionmaker,
+    event_type: str,
+    event_key: str | None,
+) -> list[models.TargetClaim]:
+    if not event_key:
+        logger.warning("Targets claim load skipped: missing event_key (event_type=%s)", event_type)
+        return []
     async with sessionmaker() as session:
         return (
-            await session.execute(select(models.TargetClaim).where(models.TargetClaim.war_id == war_id))
+            await session.execute(
+                select(models.TargetClaim)
+                .where(models.TargetClaim.event_type == event_type)
+                .where(models.TargetClaim.event_key == event_key)
+            )
         ).scalars().all()
 
 
@@ -237,9 +256,11 @@ async def _build_selection_markup(
     sessionmaker: async_sessionmaker,
     user: models.User,
     admin_mode: bool,
+    event_type: str,
+    event_key: str | None,
 ) -> InlineKeyboardMarkup:
     enemies = _sorted_enemies(war.get("opponent", {}).get("members", []))
-    claims = await _load_claims(sessionmaker, war_row.id)
+    claims = await _load_claims(sessionmaker, event_type, event_key)
     taken = {claim.enemy_position for claim in claims if claim.claimed_by_user_id != user.telegram_id}
     my_claims = {claim.enemy_position for claim in claims if claim.claimed_by_user_id == user.telegram_id}
     if _is_position_limit_active(war):
@@ -281,8 +302,10 @@ async def _show_selection(
     sessionmaker: async_sessionmaker,
     user: models.User,
     admin_mode: bool,
+    event_type: str,
+    event_key: str | None,
 ) -> None:
-    markup = await _build_selection_markup(war, war_row, sessionmaker, user, admin_mode)
+    markup = await _build_selection_markup(war, war_row, sessionmaker, user, admin_mode, event_type, event_key)
     try:
         await message.answer(
             "Выберите противника:",
@@ -299,8 +322,10 @@ async def _refresh_selection(
     sessionmaker: async_sessionmaker,
     user: models.User,
     admin_mode: bool,
+    event_type: str,
+    event_key: str | None,
 ) -> None:
-    markup = await _build_selection_markup(war, war_row, sessionmaker, user, admin_mode)
+    markup = await _build_selection_markup(war, war_row, sessionmaker, user, admin_mode, event_type, event_key)
     if callback.message is None:
         logger.warning(
             "Failed to refresh selection: missing message (user_id=%s war_id=%s)",
@@ -417,6 +442,10 @@ async def targets_select_button(
     if not enemies:
         await message.answer("Нет списка противников.", reply_markup=_menu_reply(config, message.from_user.id))
         return
+    event_type, event_key = _resolve_war_event(war, config.clan_tag)
+    if not event_key:
+        await message.answer("Не удалось определить текущую войну.", reply_markup=_menu_reply(config, message.from_user.id))
+        return
     war_row = await _ensure_war_row(sessionmaker, war)
     await _show_selection(
         message,
@@ -425,6 +454,8 @@ async def targets_select_button(
         sessionmaker,
         user,
         is_admin(message.from_user.id, config),
+        event_type,
+        event_key,
     )
 
 
@@ -451,8 +482,12 @@ async def targets_table_button(
     if not enemies:
         await message.answer("Нет списка противников.", reply_markup=_menu_reply(config, message.from_user.id))
         return
+    event_type, event_key = _resolve_war_event(war, config.clan_tag)
+    if not event_key:
+        await message.answer("Не удалось определить текущую войну.", reply_markup=_menu_reply(config, message.from_user.id))
+        return
     war_row = await _ensure_war_row(sessionmaker, war)
-    claims = await _load_claims(sessionmaker, war_row.id)
+    claims = await _load_claims(sessionmaker, event_type, event_key)
     table_chunks = await _build_table_messages(enemies, claims, sessionmaker)
     reply_markup = _menu_reply(config, message.from_user.id)
     for index, chunk in enumerate(table_chunks):
@@ -491,6 +526,10 @@ async def target_claim(
         await callback.message.answer("Выбор целей доступен только в подготовке.")
         return
     war_row = await _ensure_war_row(sessionmaker, war)
+    event_type, event_key = _resolve_war_event(war, config.clan_tag)
+    if not event_key:
+        await callback.message.answer("Не удалось определить текущую войну.")
+        return
     user = await _load_user(sessionmaker, user_id)
     if not user:
         await callback.message.answer(f"Сначала зарегистрируйтесь. Нажмите «{label('register')}».")
@@ -517,6 +556,8 @@ async def target_claim(
             sessionmaker,
             user,
             is_admin(user_id, config),
+            event_type,
+            event_key,
         )
         return
     logger.info("Target claim resolved war (user_id=%s war_id=%s position=%s)", user_id, war_row.id, position)
@@ -527,7 +568,8 @@ async def target_claim(
             existing = (
                 await session.execute(
                     select(models.TargetClaim).where(
-                        models.TargetClaim.war_id == war_row.id,
+                        models.TargetClaim.event_type == event_type,
+                        models.TargetClaim.event_key == event_key,
                         models.TargetClaim.enemy_position == position,
                     )
                 )
@@ -573,17 +615,20 @@ async def target_claim(
                         sessionmaker,
                         user,
                         is_admin(user_id, config),
+                        event_type,
+                        event_key,
                     )
                     return
             else:
                 claim_count = (
                     await session.execute(
                         select(func.count()).select_from(models.TargetClaim).where(
-                            models.TargetClaim.war_id == war_row.id,
-                        models.TargetClaim.claimed_by_user_id == user_id,
+                            models.TargetClaim.event_type == event_type,
+                            models.TargetClaim.event_key == event_key,
+                            models.TargetClaim.claimed_by_user_id == user_id,
+                        )
                     )
-                )
-            ).scalar_one()
+                ).scalar_one()
                 if claim_count >= 2:
                     await callback.message.answer("Можно выбрать не более двух целей.")
                     await _refresh_selection(
@@ -593,11 +638,15 @@ async def target_claim(
                         sessionmaker,
                         user,
                         is_admin(user_id, config),
+                        event_type,
+                        event_key,
                     )
                     return
                 session.add(
                     models.TargetClaim(
                         war_id=war_row.id,
+                        event_type=event_type,
+                        event_key=event_key,
                         enemy_position=position,
                         claimed_by_user_id=user_id,
                         reserved_for_player_tag=_normalize_member_tag(user.player_tag),
@@ -623,6 +672,8 @@ async def target_claim(
                     sessionmaker,
                     user,
                     is_admin(user_id, config),
+                    event_type,
+                    event_key,
                 )
                 return
             if result_action == "claimed":
@@ -657,6 +708,8 @@ async def target_claim(
         sessionmaker,
         user,
         is_admin(user_id, config),
+        event_type,
+        event_key,
     )
     if result_action == "unclaimed":
         await callback.message.answer(f"Цель #{position} освобождена.")
@@ -692,6 +745,10 @@ async def target_toggle(
         await callback.message.answer("Выбор целей доступен только в подготовке.")
         return
     war_row = await _ensure_war_row(sessionmaker, war)
+    event_type, event_key = _resolve_war_event(war, config.clan_tag)
+    if not event_key:
+        await callback.message.answer("Не удалось определить текущую войну.")
+        return
     user = await _load_user(sessionmaker, user_id)
     if not user:
         await callback.message.answer(f"Сначала зарегистрируйтесь. Нажмите «{label('register')}».")
@@ -712,7 +769,8 @@ async def target_toggle(
             claim = (
                 await session.execute(
                     select(models.TargetClaim).where(
-                        models.TargetClaim.war_id == war_row.id,
+                        models.TargetClaim.event_type == event_type,
+                        models.TargetClaim.event_key == event_key,
                         models.TargetClaim.enemy_position == position,
                         models.TargetClaim.claimed_by_user_id == user_id,
                     )
@@ -727,6 +785,8 @@ async def target_toggle(
                     sessionmaker,
                     user,
                     is_admin(user_id, config),
+                    event_type,
+                    event_key,
                 )
                 return
             await session.delete(claim)
@@ -754,6 +814,8 @@ async def target_toggle(
         sessionmaker,
         user,
         is_admin(user_id, config),
+        event_type,
+        event_key,
     )
     await callback.message.answer(f"Цель #{position} освобождена.")
 
@@ -787,6 +849,10 @@ async def target_admin_unclaim(
         await callback.message.answer("Не удалось получить войну.")
         return
     war_row = await _ensure_war_row(sessionmaker, war)
+    event_type, event_key = _resolve_war_event(war, config.clan_tag)
+    if not event_key:
+        await callback.message.answer("Не удалось определить текущую войну.")
+        return
     logger.info(
         "Target admin-unclaim resolved war (user_id=%s war_id=%s position=%s)",
         callback.from_user.id,
@@ -798,7 +864,8 @@ async def target_admin_unclaim(
             claim = (
                 await session.execute(
                     select(models.TargetClaim).where(
-                        models.TargetClaim.war_id == war_row.id,
+                        models.TargetClaim.event_type == event_type,
+                        models.TargetClaim.event_key == event_key,
                         models.TargetClaim.enemy_position == position,
                     )
                 )
@@ -812,6 +879,8 @@ async def target_admin_unclaim(
                     sessionmaker,
                     admin_user,
                     True,
+                    event_type,
+                    event_key,
                 )
                 return
             await session.delete(claim)
@@ -839,6 +908,8 @@ async def target_admin_unclaim(
         sessionmaker,
         admin_user,
         True,
+        event_type,
+        event_key,
     )
     await callback.message.answer(f"Назначение для цели #{position} снято.")
 
@@ -878,7 +949,11 @@ async def targets_assign_other(
         await message.answer("Нет списка противников.", reply_markup=_menu_reply(config, message.from_user.id))
         return
     war_row = await _ensure_war_row(sessionmaker, war)
-    claims = await _load_claims(sessionmaker, war_row.id)
+    event_type, event_key = _resolve_war_event(war, config.clan_tag)
+    if not event_key:
+        await message.answer("Не удалось определить текущую войну.", reply_markup=_menu_reply(config, message.from_user.id))
+        return
+    claims = await _load_claims(sessionmaker, event_type, event_key)
     taken = {claim.enemy_position for claim in claims}
     await message.answer(
         "Выберите свободную цель для назначения:",
@@ -964,6 +1039,11 @@ async def targets_assign_name(
         )
         return
     war_row = await _ensure_war_row(sessionmaker, war)
+    event_type, event_key = _resolve_war_event(war, config.clan_tag)
+    if not event_key:
+        await message.answer("Не удалось определить текущую войну.", reply_markup=_menu_reply(config, message.from_user.id))
+        await state.clear()
+        return
     warning_text = None
     reserved_tag = None
     reserved_name = input_text
@@ -989,12 +1069,14 @@ async def targets_assign_name(
             try:
                 async with session.begin():
                     session.add(
-                        models.TargetClaim(
-                            war_id=war_row.id,
-                            enemy_position=position,
-                            claimed_by_user_id=None,
-                            reserved_for_player_tag=reserved_tag,
-                            reserved_for_player_name=reserved_name,
+                    models.TargetClaim(
+                        war_id=war_row.id,
+                        event_type=event_type,
+                        event_key=event_key,
+                        enemy_position=position,
+                        claimed_by_user_id=None,
+                        reserved_for_player_tag=reserved_tag,
+                        reserved_for_player_name=reserved_name,
                             reserved_by_admin_id=message.from_user.id,
                         )
                     )

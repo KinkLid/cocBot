@@ -61,6 +61,7 @@ async def main() -> None:
     dp.include_router(admin.router)
 
     scheduler.start()
+    logging.getLogger(__name__).info("Notification scheduler started")
     try:
         await dp.start_polling(bot)
     finally:
