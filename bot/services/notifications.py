@@ -66,6 +66,102 @@ DEFAULT_DM_CATEGORIES = {
 }
 
 
+def _format_tg_user(user: models.User | None) -> str | None:
+    if not user:
+        return None
+    label = f"@{user.username}" if user.username else (user.player_name or "игрок")
+    return f"{label} (ID {user.telegram_id})"
+
+
+def _format_coc_user(user: models.User | None) -> str | None:
+    if not user:
+        return None
+    name = user.player_name or ""
+    tag = user.player_tag or ""
+    if name and tag:
+        return f"{name} ({tag})"
+    return name or tag or None
+
+
+def _format_claim_owner(user: models.User | None, external_name: str | None) -> str:
+    if external_name:
+        return external_name
+    tg_label = _format_tg_user(user)
+    coc_label = _format_coc_user(user)
+    if tg_label and coc_label:
+        return f"{tg_label} / {coc_label}"
+    return tg_label or coc_label or "неизвестно"
+
+
+def _collect_attack_violations(
+    war_data: dict[str, Any],
+    clan_tag: str,
+    claims_by_position: dict[int, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    clan, opponent = _resolve_war_sides(war_data, clan_tag)
+    clan_members = clan.get("members", [])
+    opponent_members = opponent.get("members", [])
+    if not clan_members or not opponent_members:
+        return []
+    defender_positions = {
+        normalize_tag(member.get("tag", "")): member.get("mapPosition")
+        for member in opponent_members
+        if member.get("tag")
+    }
+    defender_names = {
+        normalize_tag(member.get("tag", "")): member.get("name", "Игрок")
+        for member in opponent_members
+        if member.get("tag")
+    }
+    violations: list[dict[str, Any]] = []
+    for member in clan_members:
+        attacker_tag_raw = member.get("tag")
+        attacker_position = member.get("mapPosition")
+        if not attacker_tag_raw or not attacker_position:
+            continue
+        attacks = member.get("attacks")
+        if not isinstance(attacks, list):
+            continue
+        attacker_tag = normalize_tag(attacker_tag_raw)
+        for attack in attacks:
+            defender_tag_raw = attack.get("defenderTag")
+            if not defender_tag_raw:
+                continue
+            defender_tag = normalize_tag(defender_tag_raw)
+            defender_position = defender_positions.get(defender_tag)
+            if not defender_position:
+                continue
+            attack_order = attack.get("order")
+            if attack_order is None:
+                attack_order = attack.get("attackOrder", 0)
+            claim_info = claims_by_position.get(defender_position)
+            claim_violation = False
+            if claim_info:
+                owner_tag = claim_info.get("owner_tag")
+                if not owner_tag or owner_tag != attacker_tag:
+                    claim_violation = True
+            position_violation = defender_position > attacker_position + 10
+            if not claim_violation and not position_violation:
+                continue
+            violations.append(
+                {
+                    "war_tag": war_data.get("tag") or war_data.get("clan", {}).get("tag") or clan_tag,
+                    "war_state": war_data.get("state", "unknown"),
+                    "attacker_tag": attacker_tag,
+                    "attacker_name": member.get("name", "Игрок"),
+                    "attacker_position": attacker_position,
+                    "defender_tag": defender_tag,
+                    "defender_name": defender_names.get(defender_tag, "Противник"),
+                    "defender_position": defender_position,
+                    "attack_order": int(attack_order or 0),
+                    "position_violation": position_violation,
+                    "claim_violation": claim_violation,
+                    "claim_info": claim_info,
+                }
+            )
+    return violations
+
+
 class NotificationService:
     def __init__(
         self,
@@ -823,56 +919,58 @@ class NotificationService:
         return "\n".join(parts)
 
     async def _process_war_attack_warnings(self, war_data: dict[str, Any]) -> None:
-        clan, opponent = _resolve_war_sides(war_data, self._config.clan_tag)
-        clan_members = clan.get("members", [])
-        opponent_members = opponent.get("members", [])
-        if not clan_members or not opponent_members:
-            return
         war_tag = war_data.get("tag") or war_data.get("clan", {}).get("tag") or self._config.clan_tag
-        defender_positions = {
-            normalize_tag(member.get("tag", "")): member.get("mapPosition")
-            for member in opponent_members
-            if member.get("tag")
-        }
-        violations: list[dict[str, Any]] = []
-        for member in clan_members:
-            attacker_tag_raw = member.get("tag")
-            attacker_position = member.get("mapPosition")
-            if not attacker_tag_raw or not attacker_position:
-                continue
-            attacks = member.get("attacks")
-            if not isinstance(attacks, list):
-                continue
-            attacker_tag = normalize_tag(attacker_tag_raw)
-            for attack in attacks:
-                defender_tag_raw = attack.get("defenderTag")
-                if not defender_tag_raw:
-                    continue
-                defender_tag = normalize_tag(defender_tag_raw)
-                defender_position = defender_positions.get(defender_tag)
-                if not defender_position:
-                    continue
-                if defender_position <= attacker_position + 10:
-                    continue
-                attack_order = attack.get("order")
-                if attack_order is None:
-                    attack_order = attack.get("attackOrder", 0)
-                violations.append(
-                    {
-                        "war_tag": war_tag,
-                        "attacker_tag": attacker_tag,
-                        "attacker_name": member.get("name", "Игрок"),
-                        "attacker_position": attacker_position,
-                        "defender_tag": defender_tag,
-                        "defender_position": defender_position,
-                        "attack_order": int(attack_order or 0),
-                    }
-                )
-        if not violations:
-            return
-
         created: list[tuple[models.Complaint, dict[str, Any]]] = []
         async with self._sessionmaker() as session:
+            war_row = (
+                await session.execute(select(models.War).where(models.War.war_tag == war_tag))
+            ).scalar_one_or_none()
+            claims_by_position: dict[int, dict[str, Any]] = {}
+            claim_owner_ids: set[int] = set()
+            if war_row:
+                claims = (
+                    await session.execute(
+                        select(models.TargetClaim).where(models.TargetClaim.war_id == war_row.id)
+                    )
+                ).scalars().all()
+                claim_owner_ids = {
+                    claim.claimed_by_telegram_id
+                    for claim in claims
+                    if claim.claimed_by_telegram_id
+                }
+                claim_owners = {}
+                if claim_owner_ids:
+                    claim_owners = {
+                        user.telegram_id: user
+                        for user in (
+                            await session.execute(
+                                select(models.User).where(models.User.telegram_id.in_(claim_owner_ids))
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    }
+                for claim in claims:
+                    owner_user = None
+                    owner_tag = None
+                    if claim.claimed_by_telegram_id:
+                        owner_user = claim_owners.get(claim.claimed_by_telegram_id)
+                        if owner_user and owner_user.player_tag:
+                            owner_tag = normalize_tag(owner_user.player_tag)
+                    claims_by_position[claim.enemy_position] = {
+                        "owner_tag": owner_tag,
+                        "owner_user": owner_user,
+                        "external_name": claim.external_player_name,
+                        "owner_telegram_id": claim.claimed_by_telegram_id,
+                    }
+
+            violations = _collect_attack_violations(
+                war_data,
+                self._config.clan_tag,
+                claims_by_position,
+            )
+            if not violations:
+                return
             attacker_tags = {violation["attacker_tag"] for violation in violations}
             whitelisted_tags: set[str] = set()
             if attacker_tags:
@@ -885,6 +983,19 @@ class NotificationService:
                         )
                     ).scalars().all()
                 )
+            attacker_users = {}
+            if attacker_tags:
+                attacker_users = {
+                    normalize_tag(user.player_tag): user
+                    for user in (
+                        await session.execute(
+                            select(models.User).where(models.User.player_tag.in_(attacker_tags))
+                        )
+                    )
+                    .scalars()
+                    .all()
+                    if user.player_tag
+                }
             for violation in violations:
                 exists = (
                     await session.execute(
@@ -907,35 +1018,74 @@ class NotificationService:
                 )
                 if violation["attacker_tag"] in whitelisted_tags:
                     continue
-                complaint_text = (
-                    f"Атака на позицию #{violation['defender_position']} при своей позиции "
-                    f"#{violation['attacker_position']}. Разница больше 10."
-                )
+                attacker_user = attacker_users.get(violation["attacker_tag"])
+                attacker_tg = _format_tg_user(attacker_user)
+                claim_info = violation.get("claim_info") or {}
+                claim_owner = claim_info.get("owner_user")
+                claim_owner_label = None
+                if violation.get("claim_violation"):
+                    claim_owner_label = _format_claim_owner(
+                        claim_owner,
+                        claim_info.get("external_name"),
+                    )
+                reasons = []
+                if violation.get("position_violation"):
+                    reasons.append("атака ниже чем на 10 позиций")
+                if violation.get("claim_violation"):
+                    reasons.append("атака по занятой цели")
+                reason_line = "; ".join(reasons)
+                war_label = f"{violation['war_tag']} ({violation.get('war_state', 'unknown')})"
+                if war_row:
+                    war_label = f"{war_label}, war_id {war_row.id}"
+                attacker_line = f"Атаковал: {violation['attacker_name']} ({violation['attacker_tag']})"
+                if attacker_tg:
+                    attacker_line = f"{attacker_line} / {attacker_tg}"
+                complaint_lines = [
+                    attacker_line,
+                    (
+                        "Цель: "
+                        f"#{violation['defender_position']} "
+                        f"{violation['defender_name']} ({violation['defender_tag']})"
+                    ),
+                ]
+                if claim_owner_label:
+                    complaint_lines.append(f"Цель занята: {claim_owner_label}")
+                if reason_line:
+                    complaint_lines.append(f"Нарушение: {reason_line}.")
+                complaint_lines.append(f"Война: {war_label}.")
+                complaint_lines.append(f"Атака: order {violation['attack_order']}.")
                 complaint = models.Complaint(
                     created_by_tg_id=None,
                     created_by_tg_name="Авто-предупреждение",
                     target_player_tag=violation["attacker_tag"],
                     target_player_name=violation["attacker_name"],
-                    text=complaint_text,
+                    text="\n".join(complaint_lines),
                     type="auto_warning",
                     status="open",
                 )
                 session.add(complaint)
                 await session.flush()
+                violation["attacker_tg"] = attacker_tg
+                violation["claim_owner_label"] = claim_owner_label
                 created.append((complaint, violation))
             if created:
                 await session.commit()
 
         for complaint, violation in created:
             await notify_admins_complaint(self._bot, self._config, complaint)
-            warning_text = (
-                "<b>⚠️ Предупреждение</b>\n"
-                f"Вы атаковали цель #{violation['defender_position']}, "
-                f"хотя ваша позиция #{violation['attacker_position']}.\n"
-                "По правилам можно не ниже чем на 10 позиций.\n"
-                "Если это ошибка — напишите админам через кнопку «Жалоба»."
-            )
-            await self._send_warning_dm(violation["attacker_tag"], warning_text)
+            warning_lines = ["<b>⚠️ Предупреждение</b>"]
+            if violation.get("claim_violation"):
+                warning_lines.append(
+                    f"Вы атаковали занятую цель #{violation['defender_position']}."
+                )
+            if violation.get("position_violation"):
+                warning_lines.append(
+                    f"Вы атаковали цель #{violation['defender_position']}, "
+                    f"хотя ваша позиция #{violation['attacker_position']}."
+                )
+                warning_lines.append("По правилам можно не ниже чем на 10 позиций.")
+            warning_lines.append("Если это ошибка — напишите админам через кнопку «Жалоба».")
+            await self._send_warning_dm(violation["attacker_tag"], "\n".join(warning_lines))
 
     async def _collect_cwl_attack_summary(self) -> str | None:
         try:
