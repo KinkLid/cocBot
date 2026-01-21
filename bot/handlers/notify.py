@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import html
+
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -26,7 +28,7 @@ from bot.ui.labels import is_back, is_main_menu, label, label_variants
 from bot.utils.navigation import pop_menu, reset_menu, set_menu
 from bot.utils.notify_time import format_duration_ru_seconds, parse_duration
 from bot.utils.state import reset_state_if_any
-from bot.utils.tables import build_pre_table
+from bot.ui.renderers import render_cards, short_name
 from bot.utils.notification_rules import schedule_rule_for_active_event
 
 router = Router()
@@ -92,17 +94,15 @@ async def _get_user_or_prompt(
 
 
 def _rules_table(rows: list[models.NotificationRule]) -> str:
-    table_rows: list[list[str]] = []
+    cards: list[str] = []
     for rule in rows:
         status = "ВКЛ" if rule.is_enabled else "ВЫКЛ"
         delay_text = format_duration_ru_seconds(rule.delay_seconds)
-        custom = rule.custom_text or "—"
-        table_rows.append([str(rule.id), delay_text, status, custom])
-    return build_pre_table(
-        ["ID", "Задержка", "Статус", "Текст"],
-        table_rows,
-        max_widths=[5, 10, 6, 24],
-    )
+        custom = short_name(rule.custom_text)
+        line_one = f"🔔 <b>#{html.escape(str(rule.id))}</b> — {html.escape(status)}"
+        line_two = f"└ ⏱ {html.escape(delay_text)} • ✍️ {html.escape(custom)}"
+        cards.append(f"{line_one}\n{line_two}")
+    return render_cards(cards) or "нет данных"
 
 
 async def _handle_user_menu_escape(

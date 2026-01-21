@@ -101,8 +101,6 @@ def _is_position_limit_active(war: dict) -> bool:
 
 
 def _format_reserved_label(name: str | None, tag: str | None) -> str | None:
-    if name and tag:
-        return f"{name} ({tag})"
     return name or tag
 
 
@@ -229,8 +227,7 @@ async def _build_table_messages(
             elif claim.claimed_by_user_id:
                 user = user_map.get(claim.claimed_by_user_id)
                 if user:
-                    tg_name = f"@{user.username}" if user.username else user.player_name
-                    holder = f"{tg_name} / {user.player_name}"
+                    holder = f"@{user.username}" if user.username else user.player_name
                 else:
                     holder = "участник"
             else:

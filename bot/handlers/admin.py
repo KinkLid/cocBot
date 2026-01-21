@@ -39,8 +39,7 @@ from bot.utils.coc_time import parse_coc_time
 from bot.utils.navigation import pop_menu, reset_menu, set_menu
 from bot.utils.notify_time import format_duration_ru_seconds, parse_duration
 from bot.utils.state import reset_state_if_any
-from bot.utils.tables import build_pre_table
-from bot.ui.renderers import chunk_message, render_missed_attacks
+from bot.ui.renderers import chunk_message, render_cards, render_missed_attacks, short_name
 from bot.utils.war_state import find_current_cwl_war, get_missed_attacks_label
 from bot.utils.notification_rules import schedule_rule_for_active_event
 from bot.utils.validators import is_valid_tag, normalize_tag
@@ -135,17 +134,15 @@ def _format_datetime(value: datetime | None, zone: ZoneInfo) -> str:
 
 
 def _rules_table(rows: list[models.NotificationRule]) -> str:
-    table_rows: list[list[str]] = []
+    cards: list[str] = []
     for rule in rows:
         status = "ВКЛ" if rule.is_enabled else "ВЫКЛ"
         delay_text = format_duration_ru_seconds(rule.delay_seconds)
-        custom = rule.custom_text or "—"
-        table_rows.append([str(rule.id), delay_text, status, custom])
-    return build_pre_table(
-        ["ID", "Задержка", "Статус", "Текст"],
-        table_rows,
-        max_widths=[5, 10, 6, 24],
-    )
+        custom = short_name(rule.custom_text)
+        line_one = f"🔔 <b>#{html.escape(str(rule.id))}</b> — {html.escape(status)}"
+        line_two = f"└ ⏱ {html.escape(delay_text)} • ✍️ {html.escape(custom)}"
+        cards.append(f"{line_one}\n{line_two}")
+    return render_cards(cards) or "нет данных"
 
 
 def _users_table(
@@ -153,11 +150,11 @@ def _users_table(
     clan_joined: dict[str, datetime | None],
     zone: ZoneInfo,
 ) -> str:
-    lines: list[str] = []
+    cards: list[str] = []
     for user in users:
         tg_name_raw = f"@{user.username}" if user.username else "без username"
-        tg_name = html.escape(tg_name_raw)
-        player_name = html.escape(user.player_name or "игрок")
+        tg_name = html.escape(short_name(tg_name_raw))
+        player_name = html.escape(short_name(user.player_name or "игрок"))
         tag_label = html.escape(user.player_tag or "")
         created_at = _format_datetime(user.created_at, zone)
         joined_at = clan_joined.get(user.player_tag.upper())
@@ -167,16 +164,16 @@ def _users_table(
             joined_text = f"замечен с {_format_datetime(user.first_seen_in_clan_at, zone)}"
         else:
             joined_text = "—"
-        name_line = f"• <b>{player_name}</b>"
+        name_line = f"👤 <b>{player_name}</b>"
         if tag_label:
             name_line += f" <code>{tag_label}</code>"
-        lines.append(name_line)
-        lines.append(f"  👤 Telegram: <b>{tg_name}</b>")
-        lines.append(f"  🆔 ID: <code>{user.telegram_id}</code>")
-        lines.append(f"  🗓 Регистрация: {created_at}")
-        lines.append(f"  🏰 Клан: {joined_text}")
-        lines.append("")
-    return "\n".join(lines).strip()
+        line_two = (
+            "└ "
+            f"👤 {tg_name} • 🆔 <code>{html.escape(str(user.telegram_id))}</code> "
+            f"• 🗓 {html.escape(created_at)} • 🏰 {html.escape(joined_text)}"
+        )
+        cards.append(f"{name_line}\n{line_two}")
+    return render_cards(cards)
 
 
 async def _load_clan_members(coc_client: CocClient, clan_tag: str) -> list[dict]:
@@ -186,39 +183,34 @@ async def _load_clan_members(coc_client: CocClient, clan_tag: str) -> list[dict]
 
 
 def _blacklist_table(entries: list[models.BlacklistPlayer], zone: ZoneInfo) -> str:
-    rows: list[list[str]] = []
+    cards: list[str] = []
     for entry in entries:
         created_at = _format_datetime(entry.created_at, zone)
-        reason = entry.reason or "—"
-        rows.append([entry.player_tag, reason, str(entry.added_by_admin_id), created_at])
-    return build_pre_table(
-        ["Тег", "Причина", "Админ", "Дата"],
-        rows,
-        max_widths=[14, 24, 12, 16],
-    )
+        reason = short_name(entry.reason)
+        line_one = f"🚫 <b>{html.escape(entry.player_tag)}</b> — {html.escape(reason)}"
+        line_two = (
+            f"└ 👮 <code>{html.escape(str(entry.added_by_admin_id))}</code> "
+            f"• 🗓 {html.escape(created_at)}"
+        )
+        cards.append(f"{line_one}\n{line_two}")
+    return render_cards(cards) or "нет данных"
 
 
 def _whitelist_table(entries: list[models.WhitelistPlayer], zone: ZoneInfo) -> str:
-    rows: list[list[str]] = []
+    cards: list[str] = []
     for entry in entries:
         created_at = _format_datetime(entry.created_at, zone)
-        name = entry.player_name or "—"
-        comment = entry.comment or "—"
-        rows.append(
-            [
-                str(entry.id),
-                entry.player_tag,
-                name,
-                str(entry.added_by_admin_id),
-                created_at,
-                comment,
-            ]
+        name = short_name(entry.player_name)
+        comment = short_name(entry.comment)
+        line_one = (
+            f"✅ <b>{html.escape(entry.player_tag)}</b> — {html.escape(name)}"
         )
-    return build_pre_table(
-        ["ID", "Тег", "Имя", "Админ", "Дата", "Комментарий"],
-        rows,
-        max_widths=[6, 14, 16, 12, 16, 24],
-    )
+        line_two = (
+            f"└ 👮 <code>{html.escape(str(entry.added_by_admin_id))}</code> "
+            f"• 🗓 {html.escape(created_at)} • 💬 {html.escape(comment)}"
+        )
+        cards.append(f"{line_one}\n{line_two}")
+    return render_cards(cards) or "нет данных"
 
 
 def _users_pagination_kb(page: int, total_pages: int) -> InlineKeyboardMarkup:
