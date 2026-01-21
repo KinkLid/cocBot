@@ -41,7 +41,11 @@ def build_complaint_message(complaint: models.Complaint, timezone_name: str) -> 
     lines.append(f"Дата: {created_at}")
     if message_text:
         lines.append("Текст:")
-        lines.append(f"<pre>{message_text}</pre>")
+        for entry in message_text.splitlines():
+            if entry.strip():
+                lines.append(f"• {entry}")
+            else:
+                lines.append("•")
     else:
         lines.append("Текст: —")
     return "\n".join(lines)

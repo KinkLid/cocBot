@@ -9,6 +9,7 @@ from bot.config import BotConfig
 from bot.db import models
 from bot.services.coc_client import CocClient
 from bot.utils.coc_time import parse_coc_time
+from bot.utils.notification_events import build_capital_event_key, build_cwl_event_key, build_war_event_key
 from bot.utils.war_state import find_current_cwl_war
 
 
@@ -26,12 +27,12 @@ async def schedule_rule_for_active_event(
         except Exception:  # noqa: BLE001
             return
         if war_data.get("state") in {"preparation", "inWar"}:
-            event_id = war_data.get("tag") or war_data.get("clan", {}).get("tag")
+            event_id = build_war_event_key(war_data, config.clan_tag)
             start_at = parse_coc_time(war_data.get("startTime"))
     elif rule.event_type == "cwl":
         war_data = await find_current_cwl_war(coc_client, config.clan_tag)
         if war_data:
-            event_id = war_data.get("tag")
+            event_id = build_cwl_event_key(war_data)
             start_at = parse_coc_time(war_data.get("startTime"))
     elif rule.event_type == "capital":
         try:
@@ -45,7 +46,7 @@ async def schedule_rule_for_active_event(
             end_at = parse_coc_time(latest.get("endTime"))
             now = datetime.now(timezone.utc)
             if start_at and end_at and start_at <= now <= end_at:
-                event_id = latest.get("startTime") or latest.get("endTime") or "raid"
+                event_id = build_capital_event_key(latest)
     if not event_id or not start_at:
         return
     existing = (

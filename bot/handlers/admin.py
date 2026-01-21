@@ -40,7 +40,7 @@ from bot.utils.navigation import pop_menu, reset_menu, set_menu
 from bot.utils.notify_time import format_duration_ru, parse_delay_to_minutes
 from bot.utils.state import reset_state_if_any
 from bot.utils.tables import build_pre_table
-from bot.utils.war_attacks import build_missed_attacks_table, collect_missed_attacks
+from bot.utils.war_attacks import build_missed_attacks_list, collect_missed_attacks
 from bot.utils.war_state import find_current_cwl_war, get_missed_attacks_label
 from bot.utils.notification_rules import schedule_rule_for_active_event
 from bot.utils.validators import is_valid_tag, normalize_tag
@@ -1059,7 +1059,7 @@ async def admin_missed_attacks_now(
         if not missed:
             await message.answer("Все атаки сделаны.", reply_markup=admin_menu_reply())
             return
-        table = build_missed_attacks_table(missed)
+        table = build_missed_attacks_list(missed)
         await message.answer(
             f"ЛВК текущая война: кто не атаковал.\n{table}",
             reply_markup=admin_menu_reply(),
@@ -1079,7 +1079,7 @@ async def admin_missed_attacks_now(
     if not missed:
         await message.answer("Все атаки сделаны.", reply_markup=admin_menu_reply())
         return
-    table = build_missed_attacks_table(missed)
+    table = build_missed_attacks_list(missed)
     await message.answer(
         f"КВ сейчас: кто не атаковал.\n{table}",
         reply_markup=admin_menu_reply(),

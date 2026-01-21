@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
-
-from bot.utils.tables import build_pre_table
+import html
 
 
 def collect_missed_attacks(war_data: dict[str, Any]) -> list[dict[str, Any]]:
@@ -39,24 +38,27 @@ def collect_missed_attacks(war_data: dict[str, Any]) -> list[dict[str, Any]]:
     return missed
 
 
-def build_missed_attacks_table(missed: list[dict[str, Any]]) -> str:
-    headers = ["№", "Игрок", "Атак", "Осталось"]
-    rows: list[list[str]] = []
-    for index, entry in enumerate(missed, start=1):
-        name = entry.get("name") or "Игрок"
+def build_missed_attacks_list(missed: list[dict[str, Any]]) -> str:
+    if not missed:
+        return "нет данных"
+    lines = []
+    for entry in missed:
+        name = html.escape(entry.get("name") or "Игрок")
         th = entry.get("townhall")
-        if th:
-            name = f"{name} TH{th}"
+        label = f"{name} (TH{th})" if th else name
         attacks = f"{entry.get('used', 0)}/{entry.get('available', 0)}"
-        rows.append([str(index), str(name), attacks, str(entry.get("remaining", 0))])
-    return build_pre_table(headers, rows, max_widths=[4, 26, 9, 9])
+        lines.append(f"• {label} — {attacks} атак")
+    return "\n".join(lines)
 
 
-def build_total_attacks_table(rows: list[dict[str, Any]]) -> str:
-    headers = ["Игрок", "Атак (сделано/всего)", "Пропуски"]
-    table_rows: list[list[str]] = []
+def build_total_attacks_list(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return "нет данных"
+    lines = []
     for entry in rows:
-        name = entry.get("name", "Игрок")
+        name = html.escape(entry.get("name", "Игрок"))
         attacks = f"{entry.get('used', 0)}/{entry.get('available', 0)}"
-        table_rows.append([name, attacks, str(entry.get("missed", 0))])
-    return build_pre_table(headers, table_rows, max_widths=[26, 18, 10])
+        missed = entry.get("missed", 0)
+        suffix = "✅" if missed == 0 else f"(пропуск {missed})"
+        lines.append(f"• {name} — {attacks} атак {suffix}".strip())
+    return "\n".join(lines)
