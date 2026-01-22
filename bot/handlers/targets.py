@@ -6,7 +6,6 @@ from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.enums import ParseMode
 from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup
 from sqlalchemy import func, select
@@ -15,26 +14,22 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bot.config import BotConfig
 from bot.db import models
-from bot.keyboards.common import main_menu_reply, targets_admin_reply, targets_menu_reply
-from bot.keyboards.targets import targets_select_kb
+from bot.keyboards.common import targets_admin_reply, targets_menu_reply
+from bot.keyboards.targets import build_targets_keyboard, targets_admin_action_kb, targets_admin_members_kb
 from bot.services.permissions import is_admin
 from bot.services.coc_client import CocClient
 from bot.services.hints import send_hint_once
 from bot.texts.hints import TARGETS_HINT
-from bot.ui.labels import admin_unclaim_label, is_back, is_main_menu, label, label_variants
-from bot.ui.renderers import render_targets_table
+from bot.ui.labels import admin_unclaim_label, label, label_variants
+from bot.ui.renderers import render_targets_table, short_name
 from bot.utils.navigation import reset_menu
 from bot.utils.notification_events import build_war_event_key
 from bot.utils.state import reset_state_if_any
-from bot.utils.validators import is_valid_tag, normalize_player_name, normalize_tag
+from bot.utils.validators import normalize_tag
 from bot.utils.war_rules import get_war_start_time, is_rules_window_active
 
 logger = logging.getLogger(__name__)
 router = Router()
-
-
-class TargetsState(StatesGroup):
-    waiting_external_name = State()
 
 
 def _menu_reply(config: BotConfig, telegram_id: int):
@@ -43,6 +38,10 @@ def _menu_reply(config: BotConfig, telegram_id: int):
 
 def _sorted_enemies(enemies: list[dict]) -> list[dict]:
     return sorted(enemies, key=lambda enemy: enemy.get("mapPosition") or 0)
+
+
+def _sorted_members(members: list[dict]) -> list[dict]:
+    return sorted(members, key=lambda member: member.get("mapPosition") or 0)
 
 
 async def _load_war(coc_client: CocClient, clan_tag: str) -> dict | None:
@@ -104,21 +103,27 @@ def _format_reserved_label(name: str | None, tag: str | None) -> str | None:
     return name or tag
 
 
-def _find_member_by_name(war: dict, name: str) -> tuple[dict | None, bool]:
-    normalized_target = normalize_player_name(name)
-    if not normalized_target:
-        return None, False
-    members = war.get("clan", {}).get("members", [])
-    matches = [
-        member
-        for member in members
-        if normalize_player_name(member.get("name")) == normalized_target
-    ]
-    if len(matches) == 1:
-        return matches[0], False
-    if len(matches) > 1:
-        return None, True
-    return None, False
+async def _resolve_claim_holder_label(
+    sessionmaker: async_sessionmaker,
+    claim: models.TargetClaim,
+) -> str | None:
+    reserved_label = _format_reserved_label(
+        claim.reserved_for_player_name,
+        claim.reserved_for_player_tag,
+    )
+    if reserved_label:
+        return reserved_label
+    if not claim.claimed_by_user_id:
+        return None
+    async with sessionmaker() as session:
+        user = (
+            await session.execute(
+                select(models.User).where(models.User.telegram_id == claim.claimed_by_user_id)
+            )
+        ).scalar_one_or_none()
+    if not user:
+        return None
+    return f"@{user.username}" if user.username else user.player_name
 
 
 def _find_member_by_tag(war: dict, tag: str) -> dict | None:
@@ -247,6 +252,177 @@ async def _build_table_messages(
     )
 
 
+async def _build_admin_targets_markup(
+    war: dict,
+    sessionmaker: async_sessionmaker,
+    event_type: str,
+    event_key: str | None,
+) -> InlineKeyboardMarkup:
+    enemies = _sorted_enemies(war.get("opponent", {}).get("members", []))
+    claims = await _load_claims(sessionmaker, event_type, event_key)
+    taken = {claim.enemy_position for claim in claims}
+    admin_assigned = {claim.enemy_position for claim in claims if claim.reserved_by_admin_id}
+    return build_targets_keyboard(
+        enemies,
+        mode="admin",
+        taken_positions=taken,
+        my_positions=set(),
+        admin_assigned_positions=admin_assigned,
+    )
+
+
+async def _send_admin_targets_list(
+    message: Message | None,
+    callback: CallbackQuery | None,
+    war: dict,
+    sessionmaker: async_sessionmaker,
+    event_type: str,
+    event_key: str | None,
+    text: str = "Выберите цель для назначения:",
+) -> None:
+    markup = await _build_admin_targets_markup(war, sessionmaker, event_type, event_key)
+    if callback and callback.message:
+        try:
+            await callback.message.edit_text(text, reply_markup=markup)
+            return
+        except (TelegramBadRequest, TelegramForbiddenError) as exc:
+            logger.warning("Failed to edit admin targets list: %s", exc)
+    if message:
+        await message.answer(text, reply_markup=markup)
+    elif callback and callback.message:
+        await callback.message.answer(text, reply_markup=markup)
+
+
+async def _show_admin_target_details(
+    callback: CallbackQuery,
+    war: dict,
+    sessionmaker: async_sessionmaker,
+    event_type: str,
+    event_key: str | None,
+    position: int,
+) -> None:
+    enemies = {enemy.get("mapPosition"): enemy for enemy in war.get("opponent", {}).get("members", [])}
+    enemy = enemies.get(position, {})
+    th = enemy.get("townhallLevel")
+    name = enemy.get("name")
+    claim = None
+    claims = await _load_claims(sessionmaker, event_type, event_key)
+    for entry in claims:
+        if entry.enemy_position == position:
+            claim = entry
+            break
+    lines = [f"Выбрана цель #{position}" + (f" TH{th}" if th else "")]
+    if name:
+        lines.append(f"Противник: {short_name(name)}")
+    if claim:
+        holder = await _resolve_claim_holder_label(sessionmaker, claim)
+        if holder:
+            lines.append(f"Сейчас занято: {holder}")
+        else:
+            lines.append("Сейчас занято: участник")
+    else:
+        lines.append("Цель свободна.")
+    markup = targets_admin_action_kb(position, has_claim=claim is not None)
+    if callback.message:
+        await callback.message.edit_text("\n".join(lines), reply_markup=markup)
+
+
+async def _admin_release_claim(
+    sessionmaker: async_sessionmaker,
+    event_type: str,
+    event_key: str | None,
+    enemy_position: int,
+    admin_id: int,
+) -> bool:
+    if not event_key:
+        return False
+    try:
+        async with sessionmaker() as session:
+            claim = (
+                await session.execute(
+                    select(models.TargetClaim).where(
+                        models.TargetClaim.event_type == event_type,
+                        models.TargetClaim.event_key == event_key,
+                        models.TargetClaim.enemy_position == enemy_position,
+                    )
+                )
+            ).scalar_one_or_none()
+            if not claim:
+                return False
+            owner = _format_reserved_label(
+                claim.reserved_for_player_name,
+                claim.reserved_for_player_tag,
+            ) or (str(claim.claimed_by_user_id) if claim.claimed_by_user_id else None)
+            await session.delete(claim)
+            await session.commit()
+        logger.info(
+            "Admin released claim (admin_id=%s enemy_position=%s event_key=%s old_owner=%s)",
+            admin_id,
+            enemy_position,
+            event_key,
+            owner,
+        )
+        return True
+    except SQLAlchemyError as exc:
+        logger.exception(
+            "Failed to release claim (admin_id=%s enemy_position=%s event_key=%s): %s",
+            admin_id,
+            enemy_position,
+            event_key,
+            exc,
+        )
+        return False
+
+
+async def _assign_target_to_member(
+    sessionmaker: async_sessionmaker,
+    war_row: models.War,
+    event_type: str,
+    event_key: str | None,
+    enemy_position: int,
+    member: dict,
+    admin_id: int,
+) -> None:
+    normalized_tag = _normalize_member_tag(member.get("tag"))
+    member_name = member.get("name")
+    async with sessionmaker() as session:
+        claim = (
+            await session.execute(
+                select(models.TargetClaim).where(
+                    models.TargetClaim.event_type == event_type,
+                    models.TargetClaim.event_key == event_key,
+                    models.TargetClaim.enemy_position == enemy_position,
+                )
+            )
+        ).scalar_one_or_none()
+        user = None
+        if normalized_tag:
+            user = (
+                await session.execute(
+                    select(models.User).where(models.User.player_tag == normalized_tag)
+                )
+            ).scalar_one_or_none()
+        if claim:
+            claim.claimed_by_user_id = user.telegram_id if user else None
+            claim.reserved_for_player_tag = normalized_tag
+            claim.reserved_for_player_name = member_name
+            claim.reserved_by_admin_id = admin_id
+        else:
+            session.add(
+                models.TargetClaim(
+                    war_id=war_row.id,
+                    event_type=event_type,
+                    event_key=event_key,
+                    enemy_position=enemy_position,
+                    claimed_by_user_id=user.telegram_id if user else None,
+                    reserved_for_player_tag=normalized_tag,
+                    reserved_for_player_name=member_name,
+                    reserved_by_admin_id=admin_id,
+                )
+            )
+        await session.commit()
+
+
 async def _build_selection_markup(
     war: dict,
     war_row: models.War,
@@ -289,7 +465,13 @@ async def _build_selection_markup(
                     f"targets:admin-unclaim:{claim.enemy_position}",
                 )
             )
-    return targets_select_kb(enemies, taken, my_claims, admin_rows=admin_rows)
+    return build_targets_keyboard(
+        enemies,
+        mode="user",
+        taken_positions=taken,
+        my_positions=my_claims,
+        admin_rows=admin_rows,
+    )
 
 
 async def _show_selection(
@@ -941,175 +1123,219 @@ async def targets_assign_other(
             reply_markup=_menu_reply(config, message.from_user.id),
         )
         return
-    enemies = _sorted_enemies(war.get("opponent", {}).get("members", []))
-    if not enemies:
-        await message.answer("Нет списка противников.", reply_markup=_menu_reply(config, message.from_user.id))
-        return
-    war_row = await _ensure_war_row(sessionmaker, war)
     event_type, event_key = _resolve_war_event(war, config.clan_tag)
     if not event_key:
         await message.answer("Не удалось определить текущую войну.", reply_markup=_menu_reply(config, message.from_user.id))
         return
-    claims = await _load_claims(sessionmaker, event_type, event_key)
-    taken = {claim.enemy_position for claim in claims}
-    await message.answer(
-        "Выберите свободную цель для назначения:",
-        reply_markup=targets_select_kb(enemies, taken, set(), assign_mode=True),
-    )
+    await _send_admin_targets_list(message, None, war, sessionmaker, event_type, event_key)
 
 
-@router.callback_query(lambda c: c.data and c.data.startswith("targets:assign:"))
-async def targets_assign_select(
+@router.callback_query(lambda c: c.data and c.data.startswith("targets:admin-select:"))
+async def targets_admin_select(
     callback: CallbackQuery,
-    state: FSMContext,
-    config: BotConfig,
-) -> None:
-    if not is_admin(callback.from_user.id, config):
-        await callback.answer("Доступно только администраторам.")
-        await callback.message.answer("Доступно только администраторам.")
-        return
-    await callback.answer("Введите ник игрока…")
-    position = int(callback.data.split(":")[2])
-    await state.update_data(assign_position=position)
-    await state.set_state(TargetsState.waiting_external_name)
-    await _safe_delete_message(
-        callback.message,
-        "Не удалось удалить сообщение. Проверьте права бота в чате.",
-    )
-    await callback.message.answer("Введите ник игрока в игре:")
-
-
-@router.callback_query(lambda c: c.data == "targets:none")
-async def targets_no_available(callback: CallbackQuery) -> None:
-    await callback.answer("Нет доступных целей.", show_alert=True)
-
-
-@router.message(TargetsState.waiting_external_name)
-async def targets_assign_name(
-    message: Message,
     state: FSMContext,
     config: BotConfig,
     coc_client: CocClient,
     sessionmaker: async_sessionmaker,
 ) -> None:
-    if not is_admin(message.from_user.id, config):
-        await state.clear()
-        await message.answer("Доступно только администраторам.")
+    await callback.answer("Открываю цель…")
+    await reset_state_if_any(state)
+    if not is_admin(callback.from_user.id, config):
+        await callback.message.answer("Доступно только администраторам.")
         return
-    if is_main_menu(message.text):
-        await state.clear()
-        await reset_menu(state)
-        await message.answer(
-            "Главное меню.",
-            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
-        )
+    position = int(callback.data.split(":")[2])
+    war = await _load_war(coc_client, config.clan_tag)
+    if not war:
+        await callback.message.answer("Не удалось получить войну.")
         return
-    if is_back(message.text):
-        await state.clear()
-        await message.answer(
-            "Действие отменено.",
-            reply_markup=_menu_reply(config, message.from_user.id),
-        )
+    if not _is_active_war_state(war.get("state")):
+        await callback.message.answer("Назначение целей доступно только во время активной войны.")
         return
-    data = await state.get_data()
-    position = data.get("assign_position")
-    if not position:
-        await state.clear()
-        await message.answer("Не удалось определить цель. Повторите.")
+    event_type, event_key = _resolve_war_event(war, config.clan_tag)
+    if not event_key:
+        await callback.message.answer("Не удалось определить текущую войну.")
         return
-    input_text = (message.text or "").strip()
-    if not input_text:
-        await message.answer("Введите ник игрока.")
+    await _show_admin_target_details(callback, war, sessionmaker, event_type, event_key, position)
+
+
+@router.callback_query(lambda c: c.data == "targets:admin-back")
+async def targets_admin_back(
+    callback: CallbackQuery,
+    state: FSMContext,
+    config: BotConfig,
+    coc_client: CocClient,
+    sessionmaker: async_sessionmaker,
+) -> None:
+    await callback.answer("Обновляю…")
+    await reset_state_if_any(state)
+    if not is_admin(callback.from_user.id, config):
+        await callback.message.answer("Доступно только администраторам.")
         return
     war = await _load_war(coc_client, config.clan_tag)
     if not war:
-        logger.info("Targets assign blocked: war not active (reason=not_found)")
-        await state.clear()
-        await message.answer("Не удалось получить войну.", reply_markup=_menu_reply(config, message.from_user.id))
+        await callback.message.answer("Не удалось получить войну.")
         return
     if not _is_active_war_state(war.get("state")):
-        logger.info("Targets assign blocked: war not active (state=%s)", war.get("state"))
-        await state.clear()
-        await message.answer(
-            "Назначение целей доступно только во время активной войны.",
-            reply_markup=_menu_reply(config, message.from_user.id),
-        )
+        await callback.message.answer("Назначение целей доступно только во время активной войны.")
         return
-    war_row = await _ensure_war_row(sessionmaker, war)
     event_type, event_key = _resolve_war_event(war, config.clan_tag)
     if not event_key:
-        await message.answer("Не удалось определить текущую войну.", reply_markup=_menu_reply(config, message.from_user.id))
-        await state.clear()
+        await callback.message.answer("Не удалось определить текущую войну.")
         return
-    warning_text = None
-    reserved_tag = None
-    reserved_name = input_text
-    normalized_tag = normalize_tag(input_text)
-    if is_valid_tag(normalized_tag):
-        reserved_tag = normalized_tag
-        member = _find_member_by_tag(war, normalized_tag)
-        if member:
-            reserved_name = member.get("name", input_text)
-        else:
-            warning_text = "Тег не найден в составе войны. Лучше указывать точный тег участника."
-    else:
-        member, ambiguous = _find_member_by_name(war, input_text)
-        if member:
-            reserved_tag = _normalize_member_tag(member.get("tag"))
-            reserved_name = member.get("name", input_text)
-        elif ambiguous:
-            warning_text = "Ник совпадает у нескольких игроков. Лучше указывать точный тег."
-        else:
-            warning_text = "Игрок не найден по нику. Лучше указывать точный тег."
-    try:
-        async with sessionmaker() as session:
-            try:
-                async with session.begin():
-                    session.add(
-                    models.TargetClaim(
-                        war_id=war_row.id,
-                        event_type=event_type,
-                        event_key=event_key,
-                        enemy_position=position,
-                        claimed_by_user_id=None,
-                        reserved_for_player_tag=reserved_tag,
-                        reserved_for_player_name=reserved_name,
-                            reserved_by_admin_id=message.from_user.id,
-                        )
-                    )
-            except IntegrityError:
-                await session.rollback()
-                logger.info(
-                    "Target assign conflict (user_id=%s war_id=%s target_position=%s db_result=conflict)",
-                    message.from_user.id,
-                    war_row.id,
-                    position,
-                )
-                await message.answer("Цель уже занята. Выберите другую.")
-                await state.clear()
-                return
-            logger.info(
-                "Target assigned (user_id=%s war_id=%s target_position=%s db_result=created)",
-                message.from_user.id,
-                war_row.id,
-                position,
-            )
-    except SQLAlchemyError as exc:
-        logger.exception(
-            "Failed to assign external target (user_id=%s war_id=%s target_position=%s): %s",
-            message.from_user.id,
-            war_row.id,
-            position,
-            exc,
-        )
-        await message.answer("Не удалось назначить цель. Попробуйте позже.")
-        await state.clear()
+    await _send_admin_targets_list(None, callback, war, sessionmaker, event_type, event_key)
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("targets:admin-assign:"))
+async def targets_admin_assign(
+    callback: CallbackQuery,
+    state: FSMContext,
+    config: BotConfig,
+    coc_client: CocClient,
+) -> None:
+    await callback.answer("Выбирайте игрока…")
+    await reset_state_if_any(state)
+    if not is_admin(callback.from_user.id, config):
+        await callback.message.answer("Доступно только администраторам.")
         return
-    await state.clear()
-    response_lines = [f"Назначено: цель #{position} за {reserved_name}."]
-    if warning_text:
-        response_lines.append(warning_text)
-    await message.answer(
-        "\n".join(response_lines),
-        reply_markup=_menu_reply(config, message.from_user.id),
+    position = int(callback.data.split(":")[2])
+    war = await _load_war(coc_client, config.clan_tag)
+    if not war:
+        await callback.message.answer("Не удалось получить войну.")
+        return
+    if not _is_active_war_state(war.get("state")):
+        await callback.message.answer("Назначение целей доступно только во время активной войны.")
+        return
+    members = _sorted_members(war.get("clan", {}).get("members", []))
+    if not members:
+        await callback.message.answer("Нет списка участников войны.")
+        return
+    markup = targets_admin_members_kb(members, position=position, page=1)
+    if callback.message:
+        await callback.message.edit_text("Выберите участника войны:", reply_markup=markup)
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("targets:admin-page:"))
+async def targets_admin_members_page(
+    callback: CallbackQuery,
+    state: FSMContext,
+    config: BotConfig,
+    coc_client: CocClient,
+) -> None:
+    await callback.answer("Открываю страницу…")
+    await reset_state_if_any(state)
+    if not is_admin(callback.from_user.id, config):
+        await callback.message.answer("Доступно только администраторам.")
+        return
+    parts = callback.data.split(":")
+    if len(parts) < 4:
+        await callback.message.answer("Не удалось переключить страницу.")
+        return
+    position = int(parts[2])
+    page = int(parts[3])
+    war = await _load_war(coc_client, config.clan_tag)
+    if not war:
+        await callback.message.answer("Не удалось получить войну.")
+        return
+    members = _sorted_members(war.get("clan", {}).get("members", []))
+    if not members:
+        await callback.message.answer("Нет списка участников войны.")
+        return
+    markup = targets_admin_members_kb(members, position=position, page=page)
+    if callback.message:
+        await callback.message.edit_reply_markup(reply_markup=markup)
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("targets:admin-pick:"))
+async def targets_admin_pick_member(
+    callback: CallbackQuery,
+    state: FSMContext,
+    config: BotConfig,
+    coc_client: CocClient,
+    sessionmaker: async_sessionmaker,
+) -> None:
+    await callback.answer("Назначаю…")
+    await reset_state_if_any(state)
+    if not is_admin(callback.from_user.id, config):
+        await callback.message.answer("Доступно только администраторам.")
+        return
+    parts = callback.data.split(":")
+    if len(parts) < 4:
+        await callback.message.answer("Не удалось определить игрока.")
+        return
+    position = int(parts[2])
+    player_tag = normalize_tag(parts[3])
+    war = await _load_war(coc_client, config.clan_tag)
+    if not war:
+        await callback.message.answer("Не удалось получить войну.")
+        return
+    if not _is_active_war_state(war.get("state")):
+        await callback.message.answer("Назначение целей доступно только во время активной войны.")
+        return
+    event_type, event_key = _resolve_war_event(war, config.clan_tag)
+    if not event_key:
+        await callback.message.answer("Не удалось определить текущую войну.")
+        return
+    war_row = await _ensure_war_row(sessionmaker, war)
+    member = _find_member_by_tag(war, player_tag)
+    if not member:
+        await callback.message.answer("Игрок не найден в текущей войне.")
+        return
+    await _assign_target_to_member(
+        sessionmaker,
+        war_row,
+        event_type,
+        event_key,
+        position,
+        member,
+        callback.from_user.id,
     )
+    logger.info(
+        "Target assigned by admin (admin_id=%s position=%s member_tag=%s)",
+        callback.from_user.id,
+        position,
+        player_tag,
+    )
+    await callback.answer("Назначено ✅")
+    await _show_admin_target_details(callback, war, sessionmaker, event_type, event_key, position)
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("targets:admin-release:"))
+async def targets_admin_release(
+    callback: CallbackQuery,
+    state: FSMContext,
+    config: BotConfig,
+    coc_client: CocClient,
+    sessionmaker: async_sessionmaker,
+) -> None:
+    await callback.answer("Освобождаю…")
+    await reset_state_if_any(state)
+    if not is_admin(callback.from_user.id, config):
+        await callback.message.answer("Доступно только администраторам.")
+        return
+    position = int(callback.data.split(":")[2])
+    war = await _load_war(coc_client, config.clan_tag)
+    if not war:
+        await callback.message.answer("Не удалось получить войну.")
+        return
+    if not _is_active_war_state(war.get("state")):
+        await callback.message.answer("Назначение целей доступно только во время активной войны.")
+        return
+    event_type, event_key = _resolve_war_event(war, config.clan_tag)
+    if not event_key:
+        await callback.message.answer("Не удалось определить текущую войну.")
+        return
+    released = await _admin_release_claim(
+        sessionmaker,
+        event_type,
+        event_key,
+        position,
+        callback.from_user.id,
+    )
+    if not released:
+        await callback.message.answer("Цель уже свободна.")
+    await _send_admin_targets_list(None, callback, war, sessionmaker, event_type, event_key)
+
+
+@router.callback_query(lambda c: c.data == "targets:none")
+async def targets_no_available(callback: CallbackQuery) -> None:
+    await callback.answer("Нет доступных целей.", show_alert=True)
