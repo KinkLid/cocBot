@@ -16,14 +16,14 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from bot.config import BotConfig
 from bot.db import models
 from bot.keyboards.common import main_menu_reply, registration_reply
-from bot.keyboards.hints import hint_ack_kb
+from bot.keyboards.hints import hint_ack_kb, token_help_kb
 from bot.services.coc_client import CocClient
 from bot.services.permissions import is_admin
-from bot.texts.hints import REGISTER_HINT
+from bot.texts.hints import REGISTER_HINT, TOKEN_REQUEST_TEXT
 from bot.ui.labels import is_main_menu, label, label_variants
 from bot.utils.navigation import reset_menu
 from bot.utils.state import reset_state_if_any
-from bot.utils.tokens import hash_token
+from bot.utils.tokens import hash_token, mask_token, normalize_token
 from bot.utils.validators import is_valid_tag, normalize_tag
 from bot.utils.telegram import build_bot_dm_keyboard, build_bot_dm_link, try_send_dm
 
@@ -169,7 +169,11 @@ async def register_tag(message: Message, state: FSMContext, config: BotConfig) -
     await state.set_state(RegisterState.waiting_token)
     logger.info("registration_state_set step=waiting_token user_id=%s", message.from_user.id)
     await message.answer(
-        "Теперь пришлите API token из игры:",
+        TOKEN_REQUEST_TEXT,
+        reply_markup=token_help_kb(),
+    )
+    await message.answer(
+        "Если всё готово, отправьте токен одним сообщением.",
         reply_markup=registration_reply(),
     )
 
@@ -193,13 +197,39 @@ async def register_token(
             ),
         )
         return
-    token = (message.text or "").strip()
+    token_raw = message.text or ""
+    token = normalize_token(token_raw)
+    token_mask = mask_token(token)
+    token_raw_len = len(token_raw)
+    token_len = len(token)
+    token_changed = token != token_raw
+    logger.info(
+        "registration_token_input user_id=%s raw_len=%s token_len=%s sanitized=%s token_mask=%s",
+        message.from_user.id,
+        token_raw_len,
+        token_len,
+        token_changed,
+        token_mask,
+    )
     data = await state.get_data()
     player_tag = data.get("player_tag")
     if not player_tag:
         await state.clear()
         await message.answer(
             f"Что-то пошло не так. Нажмите «{label('register')}» ещё раз.",
+            reply_markup=registration_reply(),
+        )
+        return
+
+    if not token:
+        logger.info(
+            "registration_token_result user_id=%s player_tag=%s result=format_error",
+            message.from_user.id,
+            player_tag,
+        )
+        await message.answer(
+            "Токен пустой или не распознан. Проверьте, что отправили токен из игры "
+            "(Настройки → Доп. настройки → API Token).",
             reply_markup=registration_reply(),
         )
         return
@@ -216,12 +246,20 @@ async def register_token(
         return
 
     if not verified:
-        logger.info("coc_verify_invalid user_id=%s player_tag=%s", message.from_user.id, player_tag)
+        logger.info(
+            "registration_token_result user_id=%s player_tag=%s result=auth_error token_len=%s token_mask=%s",
+            message.from_user.id,
+            player_tag,
+            token_len,
+            token_mask,
+        )
         await message.answer(
-            "Токен не подходит. Проверьте правильность.",
+            "Токен не подходит. Убедитесь, что это токен из игры (Настройки → Доп. настройки → API Token). "
+            "Ключ разработчика Clash Developers не подходит.",
             reply_markup=registration_reply(),
         )
         return
+    logger.info("registration_token_result user_id=%s player_tag=%s result=ok", message.from_user.id, player_tag)
     logger.info("coc_verify_ok user_id=%s player_tag=%s", message.from_user.id, player_tag)
 
     try:

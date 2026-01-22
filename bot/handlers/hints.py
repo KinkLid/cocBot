@@ -6,6 +6,8 @@ from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery
 
+from bot.texts.hints import TOKEN_HELP_TEXT
+
 router = Router()
 logger = logging.getLogger(__name__)
 
@@ -21,3 +23,9 @@ async def hint_ok(callback: CallbackQuery) -> None:
             await callback.message.edit_reply_markup(reply_markup=None)
         except TelegramBadRequest as exc2:
             logger.info("Failed to edit hint message: %s", exc2)
+
+
+@router.callback_query(F.data == "hint:token")
+async def hint_token(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await callback.message.answer(TOKEN_HELP_TEXT)

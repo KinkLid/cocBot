@@ -55,6 +55,7 @@ EMOJI = {
     "reminder_time": "🕒",
     "cancel": "❌",
     "ack": "✅",
+    "token_help": "📖",
     "no_targets": "🚫",
     "admin_unclaim": "🛠",
 }

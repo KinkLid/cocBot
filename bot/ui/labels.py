@@ -54,6 +54,7 @@ LABELS = {
     "reminder_time": "Время HH:MM",
     "cancel": "Отмена",
     "ack": "Понятно",
+    "token_help": "Как найти токен",
     "no_targets": "Нет доступных целей",
 }
 
