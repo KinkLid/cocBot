@@ -27,6 +27,7 @@ from bot.utils.notification_events import (
     build_war_event_key,
 )
 from bot.utils.notify_time import format_duration_ru, format_duration_ru_seconds
+from bot.utils.notification_templates import unpack_rule_text
 from bot.utils.war_attacks import collect_missed_attacks
 from bot.utils.validators import normalize_player_name, normalize_tag
 from bot.utils.war_rules import get_war_start_time, is_rules_window_active
@@ -971,7 +972,8 @@ class NotificationService:
         rule: models.NotificationRule,
     ) -> str | None:
         delay_text = format_duration_ru_seconds(rule.delay_seconds) if rule.delay_seconds else None
-        description = html.escape(rule.custom_text or "")
+        _, description_text = unpack_rule_text(rule.custom_text)
+        description = html.escape(description_text)
         if rule.event_type == "war":
             war_data = await self._coc.get_current_war(self._config.clan_tag)
             current_event_id = build_war_event_key(war_data, self._config.clan_tag)
