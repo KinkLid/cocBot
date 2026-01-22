@@ -20,12 +20,17 @@ from bot.keyboards.common import (
     admin_blacklist_menu_reply,
     admin_action_reply,
     admin_menu_reply,
-    admin_notify_category_reply,
-    admin_notify_menu_reply,
     admin_whitelist_menu_reply,
     main_menu_reply,
-    notify_rules_action_reply,
-    notify_rules_type_reply,
+)
+from bot.keyboards.notify_inline import (
+    admin_notify_main_kb,
+    notify_delay_kb,
+    notify_rule_edit_kb,
+    notify_rule_list_kb,
+    notify_rules_action_kb,
+    notify_save_kb,
+    notify_template_kb,
 )
 from bot.keyboards.blacklist import blacklist_members_kb
 from bot.services.commands import register_bot_commands
@@ -37,11 +42,12 @@ from bot.texts.hints import ADMIN_NOTIFY_HINT
 from bot.ui.labels import is_back, is_main_menu, label, label_variants
 from bot.utils.coc_time import parse_coc_time
 from bot.utils.navigation import pop_menu, reset_menu, set_menu
-from bot.utils.notify_time import format_duration_ru_seconds, parse_duration
+from bot.utils.notify_time import format_duration_ru_seconds
 from bot.utils.state import reset_state_if_any
 from bot.ui.renderers import chunk_message, render_cards, render_missed_attacks, short_name
 from bot.utils.war_state import find_current_cwl_war, get_missed_attacks_label
 from bot.utils.notification_rules import schedule_rule_for_active_event
+from bot.utils.notification_templates import pack_rule_text, template_label, unpack_rule_text
 from bot.utils.validators import is_valid_tag, normalize_tag
 
 logger = logging.getLogger(__name__)
@@ -58,14 +64,10 @@ ADMIN_EVENT_LABELS = {
 
 class AdminState(StatesGroup):
     waiting_wipe_target = State()
-    rule_choose_type = State()
     rule_action = State()
-    rule_delay_value = State()
-    rule_text = State()
-    rule_edit_id = State()
-    rule_edit_delay = State()
+    rule_add = State()
+    rule_add_text = State()
     rule_edit_text = State()
-    rule_toggle_delete = State()
     blacklist_add_tag = State()
     blacklist_add_reason = State()
     blacklist_remove_tag = State()
@@ -125,6 +127,36 @@ async def _update_chat_pref(
         return prefs
 
 
+async def _toggle_chat_category(
+    sessionmaker: async_sessionmaker,
+    config: BotConfig,
+    category: str,
+) -> dict:
+    async with sessionmaker() as session:
+        settings = (
+            await session.execute(
+                select(models.ChatNotificationSetting).where(
+                    models.ChatNotificationSetting.chat_id == config.main_chat_id
+                )
+            )
+        ).scalar_one_or_none()
+        if not settings:
+            settings = models.ChatNotificationSetting(
+                chat_id=config.main_chat_id, preferences={}
+            )
+            session.add(settings)
+            await session.flush()
+        prefs = normalize_chat_prefs(settings.preferences)
+        current = prefs.get(category, {})
+        enabled = any(current.values())
+        for key in current:
+            current[key] = not enabled
+        prefs[category] = current
+        settings.preferences = prefs
+        await session.commit()
+        return prefs
+
+
 def _format_datetime(value: datetime | None, zone: ZoneInfo) -> str:
     if not value:
         return "—"
@@ -136,11 +168,16 @@ def _format_datetime(value: datetime | None, zone: ZoneInfo) -> str:
 def _rules_table(rows: list[models.NotificationRule]) -> str:
     cards: list[str] = []
     for rule in rows:
-        status = "ВКЛ" if rule.is_enabled else "ВЫКЛ"
+        status = "🟢" if rule.is_enabled else "🔴"
         delay_text = format_duration_ru_seconds(rule.delay_seconds)
-        custom = short_name(rule.custom_text)
-        line_one = f"🔔 <b>#{html.escape(str(rule.id))}</b> — {html.escape(status)}"
-        line_two = f"└ ⏱ {html.escape(delay_text)} • ✍️ {html.escape(custom)}"
+        template, description = unpack_rule_text(rule.custom_text)
+        template_text = template_label(template) or "—"
+        custom = short_name(description) or "—"
+        line_one = f"{status} <b>#{html.escape(str(rule.id))}</b>"
+        line_two = (
+            f"└ ⏱ через {html.escape(delay_text)} • 🏷 {html.escape(template_text)}"
+            f" • ✍️ {html.escape(custom)}"
+        )
         cards.append(f"{line_one}\n{line_two}")
     return render_cards(cards) or "нет данных"
 
@@ -269,19 +306,10 @@ async def _show_admin_menu_for_stack(
         await message.answer("Вайтлист игроков.", reply_markup=admin_whitelist_menu_reply())
         return
     if current == "admin_notify_menu":
-        await message.answer("Уведомления: общий чат.", reply_markup=admin_notify_menu_reply())
-        return
-    if current in {"admin_notify_war", "admin_notify_cwl", "admin_notify_capital"}:
         prefs = await _get_chat_prefs(sessionmaker, config)
-        category_map = {
-            "admin_notify_war": "war",
-            "admin_notify_cwl": "cwl",
-            "admin_notify_capital": "capital",
-        }
-        category = category_map[current]
         await message.answer(
-            "Настройки уведомлений.",
-            reply_markup=admin_notify_category_reply(category, prefs.get(category, {})),
+            "Настройки уведомлений (чат).",
+            reply_markup=admin_notify_main_kb(prefs),
         )
         return
     await reset_menu(state)
@@ -1117,19 +1145,10 @@ async def admin_back(
         await message.answer("Админ-панель.", reply_markup=admin_menu_reply(missed_label))
         return
     if previous == "admin_notify_menu":
-        await message.answer("Уведомления: общий чат.", reply_markup=admin_notify_menu_reply())
-        return
-    if previous in {"admin_notify_war", "admin_notify_cwl", "admin_notify_capital"}:
-        category_map = {
-            "admin_notify_war": "war",
-            "admin_notify_cwl": "cwl",
-            "admin_notify_capital": "capital",
-        }
         prefs = await _get_chat_prefs(sessionmaker, config)
-        category = category_map[previous]
         await message.answer(
-            "Настройки уведомлений.",
-            reply_markup=admin_notify_category_reply(category, prefs.get(category, {})),
+            "Настройки уведомлений (чат).",
+            reply_markup=admin_notify_main_kb(prefs),
         )
         return
     await reset_menu(state)
@@ -1173,7 +1192,8 @@ async def _show_admin_notify_menu(
         )
         return
     await set_menu(state, "admin_notify_menu")
-    await message.answer("Уведомления: общий чат.", reply_markup=admin_notify_menu_reply())
+    prefs = await _get_chat_prefs(sessionmaker, config)
+    await message.answer("Настройки уведомлений (чат).", reply_markup=admin_notify_main_kb(prefs))
     await send_hint_once(
         message,
         sessionmaker,
@@ -1183,106 +1203,10 @@ async def _show_admin_notify_menu(
     )
 
 
-@router.message(
-    F.text.in_(
-        label_variants("admin_notify_war")
-        | label_variants("admin_notify_cwl")
-        | label_variants("admin_notify_capital")
-    )
-)
-async def admin_notify_category(
-    message: Message,
-    state: FSMContext,
-    config: BotConfig,
-    sessionmaker: async_sessionmaker,
-) -> None:
-    await reset_state_if_any(state)
-    if not is_admin(message.from_user.id, config):
-        await message.answer(
-            "Админ-панель доступна только администраторам.",
-            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
-        )
-        return
-    base_map = {
-        "admin_notify_war": ("war", "admin_notify_war"),
-        "admin_notify_cwl": ("cwl", "admin_notify_cwl"),
-        "admin_notify_capital": ("capital", "admin_notify_capital"),
-    }
-    category_map: dict[str, tuple[str, str]] = {}
-    for key, value in base_map.items():
-        for variant in label_variants(key):
-            category_map[variant] = value
-    category, menu_key = category_map.get(message.text or "", (None, None))
-    if not category:
-        return
-    prefs = await _get_chat_prefs(sessionmaker, config)
-    await set_menu(state, menu_key)
-    await message.answer(
-        "Настройки уведомлений.",
-        reply_markup=admin_notify_category_reply(category, prefs.get(category, {})),
-    )
-
-
-@router.message(
-    F.text.startswith("✅ КВ:")
-    | F.text.startswith("🔴 КВ:")
-    | F.text.startswith("✅ ЛВК:")
-    | F.text.startswith("🔴 ЛВК:")
-    | F.text.startswith("✅ Столица:")
-    | F.text.startswith("🔴 Столица:")
-    | F.text.startswith("✅ Итоги месяца")
-    | F.text.startswith("🔴 Итоги месяца")
-)
-async def admin_notify_toggle(
-    message: Message,
-    state: FSMContext,
-    config: BotConfig,
-    sessionmaker: async_sessionmaker,
-) -> None:
-    await reset_state_if_any(state)
-    if not is_admin(message.from_user.id, config):
-        await message.answer(
-            "Админ-панель доступна только администраторам.",
-            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
-        )
-        return
-    text = message.text or ""
-    for prefix in ("✅ ", "🔴 "):
-        if text.startswith(prefix):
-            text = text[len(prefix):]
-            break
-    mapping = {
-        "КВ: подготовка": ("war", "preparation"),
-        "КВ: старт войны": ("war", "start"),
-        "КВ: итоги": ("war", "end"),
-        "КВ: напоминания": ("war", "reminder"),
-        "ЛВК: старт раунда": ("cwl", "round_start"),
-        "ЛВК: конец раунда": ("cwl", "round_end"),
-        "ЛВК: напоминания": ("cwl", "reminder"),
-        "Итоги месяца": ("cwl", "monthly_summary"),
-        "Столица: старт рейдов": ("capital", "start"),
-        "Столица: конец рейдов": ("capital", "end"),
-        "Столица: напоминания": ("capital", "reminder"),
-    }
-    key = None
-    category = None
-    for prefix, (cat, name) in mapping.items():
-        if text.startswith(prefix):
-            category = cat
-            key = name
-            break
-    if not category or not key:
-        await message.answer("Не удалось определить тип.")
-        return
-    prefs = await _update_chat_pref(sessionmaker, config, category, key)
-    await message.answer(
-        "Настройки обновлены.",
-        reply_markup=admin_notify_category_reply(category, prefs.get(category, {})),
-    )
 
 
 @router.message(F.text.in_(label_variants("admin_notify_chat")))
-async def admin_rules_menu(
+async def admin_notify_chat_menu(
     message: Message,
     state: FSMContext,
     config: BotConfig,
@@ -1303,74 +1227,221 @@ async def admin_rules_menu(
         "seen_hint_admin_notify",
         ADMIN_NOTIFY_HINT,
     )
-    await state.set_state(AdminState.rule_choose_type)
-    await message.answer("Выберите тип уведомлений.", reply_markup=notify_rules_type_reply())
-
-
-@router.message(AdminState.rule_choose_type)
-async def admin_rules_choose_type(
-    message: Message,
-    state: FSMContext,
-    config: BotConfig,
-    sessionmaker: async_sessionmaker,
-    coc_client: CocClient,
-) -> None:
-    if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
-        return
-    if is_back(message.text):
-        missed_label = await get_missed_attacks_label(coc_client, config.clan_tag)
-        await message.answer("Админ-панель.", reply_markup=admin_menu_reply(missed_label))
-        await state.clear()
-        return
-    event_type_map: dict[str, str] = {}
-    for key, value in {
-        "notify_type_war": "war",
-        "notify_type_cwl": "cwl",
-        "notify_type_capital": "capital",
-    }.items():
-        for variant in label_variants(key):
-            event_type_map[variant] = value
-    event_type = event_type_map.get(message.text or "")
-    if not event_type:
-        await message.answer("Нужно выбрать вариант.", reply_markup=notify_rules_type_reply())
-        return
-    await state.update_data(rule_event_type=event_type)
-    await state.set_state(AdminState.rule_action)
+    prefs = await _get_chat_prefs(sessionmaker, config)
     await message.answer(
-        f"Управление уведомлениями: {ADMIN_EVENT_LABELS[event_type]}.",
-        reply_markup=notify_rules_action_reply(),
+        "Настройки уведомлений (чат).",
+        reply_markup=admin_notify_main_kb(prefs),
     )
 
 
-@router.message(AdminState.rule_action)
-async def admin_rules_action(
-    message: Message,
+@router.callback_query(F.data.startswith("an:"))
+async def admin_notify_callbacks(
+    callback: CallbackQuery,
     state: FSMContext,
     config: BotConfig,
     sessionmaker: async_sessionmaker,
     coc_client: CocClient,
 ) -> None:
-    if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
+    if not is_admin(callback.from_user.id, config):
+        await callback.answer("Недостаточно прав.", show_alert=True)
         return
-    if is_back(message.text):
-        await state.set_state(AdminState.rule_choose_type)
-        await message.answer("Выберите тип уведомлений.", reply_markup=notify_rules_type_reply())
+    parts = (callback.data or "").split(":")
+    if len(parts) < 2:
+        await callback.answer()
         return
-    data = await state.get_data()
-    event_type = data.get("rule_event_type")
-    if event_type not in {"war", "cwl", "capital"}:
-        await state.clear()
+    action = parts[1]
+    if action in {"menu", "back", "rules", "list", "add", "action", "pick", "pickdel"}:
+        await reset_state_if_any(state)
+    if action == "back":
         missed_label = await get_missed_attacks_label(coc_client, config.clan_tag)
-        await message.answer("Админ-панель.", reply_markup=admin_menu_reply(missed_label))
-        return
-    if message.text in label_variants("notify_add"):
-        await state.set_state(AdminState.rule_delay_value)
-        await message.answer(
-            "Введите задержку, например: 17h 2m 34s (h — часы, m — минуты, s — секунды).",
-            reply_markup=notify_rules_action_reply(),
+        await callback.message.answer(
+            "Админ-панель.",
+            reply_markup=admin_menu_reply(missed_label),
         )
+        await callback.message.edit_text("Настройки закрыты.")
+        await callback.answer()
         return
-    if message.text in label_variants("notify_list"):
+    if action == "menu":
+        prefs = await _get_chat_prefs(sessionmaker, config)
+        await callback.message.edit_text(
+            "Настройки уведомлений (чат).",
+            reply_markup=admin_notify_main_kb(prefs),
+        )
+        await callback.answer()
+        return
+    if action == "toggle":
+        if len(parts) < 3:
+            await callback.answer()
+            return
+        category = parts[2]
+        prefs = await _toggle_chat_category(sessionmaker, config, category)
+        await callback.message.edit_text(
+            "Настройки уведомлений (чат).",
+            reply_markup=admin_notify_main_kb(prefs),
+        )
+        await callback.answer("✅ Сохранено")
+        return
+    if action == "rules":
+        if len(parts) < 3:
+            await callback.answer()
+            return
+        event_type = parts[2]
+        if event_type not in ADMIN_EVENT_LABELS:
+            await callback.answer()
+            return
+        await state.update_data(rule_event_type=event_type)
+        await state.set_state(AdminState.rule_action)
+        await callback.message.edit_text(
+            f"Управление уведомлениями: {ADMIN_EVENT_LABELS[event_type]}.",
+            reply_markup=notify_rules_action_kb("an", event_type),
+        )
+        await callback.answer()
+        return
+    if action == "action":
+        if len(parts) < 3:
+            await callback.answer()
+            return
+        event_type = parts[2]
+        await state.update_data(rule_event_type=event_type)
+        await state.set_state(AdminState.rule_action)
+        await callback.message.edit_text(
+            f"Управление уведомлениями: {ADMIN_EVENT_LABELS.get(event_type, event_type)}.",
+            reply_markup=notify_rules_action_kb("an", event_type),
+        )
+        await callback.answer()
+        return
+    if action == "add":
+        if len(parts) < 3:
+            await callback.answer()
+            return
+        event_type = parts[2]
+        await state.update_data(
+            rule_event_type=event_type,
+            rule_delay_seconds=0,
+            rule_template=None,
+            rule_text=None,
+            rule_delay_mode="add",
+        )
+        await state.set_state(AdminState.rule_add)
+        await callback.message.edit_text(
+            "Выберите тип события.",
+            reply_markup=notify_template_kb("an", event_type),
+        )
+        await callback.answer()
+        return
+    if action == "tmpl":
+        if len(parts) < 3:
+            await callback.answer()
+            return
+        template_key = parts[2]
+        state_data = await state.get_data()
+        event_type = state_data.get("rule_event_type")
+        if event_type not in ADMIN_EVENT_LABELS:
+            await callback.answer()
+            return
+        await state.update_data(rule_template=template_key, rule_delay_seconds=0)
+        await callback.message.edit_text(
+            "Настройте задержку уведомления.",
+            reply_markup=notify_delay_kb("an", event_type, 0),
+        )
+        await callback.answer("⏱ Задержка: 0m")
+        return
+    if action == "delay":
+        if len(parts) < 3:
+            await callback.answer()
+            return
+        step = parts[2]
+        state_data = await state.get_data()
+        event_type = state_data.get("rule_event_type")
+        delay_seconds = int(state_data.get("rule_delay_seconds", 0))
+        if step == "reset":
+            delay_seconds = 0
+        elif step == "done":
+            if state_data.get("rule_delay_mode") == "edit":
+                rule_id = state_data.get("rule_edit_id")
+                async with sessionmaker() as session:
+                    rule = (
+                        await session.execute(
+                            select(models.NotificationRule)
+                            .where(models.NotificationRule.id == rule_id)
+                            .where(models.NotificationRule.chat_id == config.main_chat_id)
+                            .where(models.NotificationRule.event_type == event_type)
+                        )
+                    ).scalar_one_or_none()
+                    if not rule:
+                        await callback.answer("Уведомление не найдено.", show_alert=True)
+                        return
+                    rule.delay_seconds = delay_seconds
+                    await session.commit()
+                await state.clear()
+                await callback.message.edit_text(
+                    "✅ Задержка обновлена.",
+                    reply_markup=notify_rule_edit_kb("an", event_type, rule_id, rule.is_enabled),
+                )
+                await callback.answer("✅ Сохранено")
+                return
+            await callback.message.edit_text(
+                f"⏱ Задержка: {format_duration_ru_seconds(delay_seconds)}",
+                reply_markup=notify_save_kb("an", event_type, bool(state_data.get("rule_text"))),
+            )
+            await callback.answer("✅ Готово")
+            return
+        else:
+            try:
+                delta = int(step)
+            except ValueError:
+                await callback.answer()
+                return
+            delay_seconds = max(0, delay_seconds + delta)
+        await state.update_data(rule_delay_seconds=delay_seconds)
+        await callback.message.edit_text(
+            f"⏱ Задержка: {format_duration_ru_seconds(delay_seconds)}",
+            reply_markup=notify_delay_kb("an", event_type, delay_seconds),
+        )
+        await callback.answer()
+        return
+    if action == "text":
+        await state.set_state(AdminState.rule_add_text)
+        await callback.message.answer("Введите текст уведомления одним сообщением.")
+        await callback.answer()
+        return
+    if action == "save":
+        state_data = await state.get_data()
+        event_type = state_data.get("rule_event_type")
+        delay_seconds = int(state_data.get("rule_delay_seconds", 0))
+        template_key = state_data.get("rule_template")
+        description = state_data.get("rule_text")
+        if event_type not in ADMIN_EVENT_LABELS:
+            await callback.answer()
+            return
+        custom_text = pack_rule_text(template_key, description)
+        async with sessionmaker() as session:
+            rule = models.NotificationRule(
+                scope="chat",
+                chat_id=config.main_chat_id,
+                event_type=event_type,
+                delay_seconds=delay_seconds,
+                custom_text=custom_text,
+                is_enabled=True,
+            )
+            session.add(rule)
+            await session.flush()
+            await schedule_rule_for_active_event(session, coc_client, config, rule)
+            await session.commit()
+        await state.clear()
+        await callback.message.edit_text(
+            f"Создано: {template_label(template_key) or 'Событие'} • "
+            f"⏱ {format_duration_ru_seconds(delay_seconds)} • статус: включено",
+            reply_markup=notify_rules_action_kb("an", event_type),
+        )
+        await callback.answer("✅ Сохранено")
+        return
+    if action == "list":
+        if len(parts) < 4:
+            await callback.answer()
+            return
+        event_type = parts[2]
+        page = max(int(parts[3]), 1)
         async with sessionmaker() as session:
             rules = (
                 await session.execute(
@@ -1381,154 +1452,142 @@ async def admin_rules_action(
                 )
             ).scalars().all()
         if not rules:
-            await message.answer("Активных уведомлений нет.", reply_markup=notify_rules_action_reply())
+            await callback.message.edit_text(
+                "Активных уведомлений нет.",
+                reply_markup=notify_rules_action_kb("an", event_type),
+            )
+            await callback.answer()
             return
-        await message.answer(
-            f"Уведомления: {ADMIN_EVENT_LABELS[event_type]}.\n{_rules_table(rules)}",
-            reply_markup=notify_rules_action_reply(),
+        page_size = 5
+        start = (page - 1) * page_size
+        end = start + page_size
+        total_pages = max(1, (len(rules) + page_size - 1) // page_size)
+        visible = rules[start:end]
+        await callback.message.edit_text(
+            f"Уведомления: {ADMIN_EVENT_LABELS[event_type]}.\n{_rules_table(visible)}",
+            reply_markup=notify_rule_list_kb("an", event_type, visible, page, total_pages),
             parse_mode=ParseMode.HTML,
         )
+        await callback.answer()
         return
-    if message.text in label_variants("notify_edit"):
-        await state.set_state(AdminState.rule_edit_id)
-        await message.answer("Введите ID уведомления для изменения.", reply_markup=notify_rules_action_reply())
-        return
-    if message.text in label_variants("notify_delete"):
-        await state.set_state(AdminState.rule_toggle_delete)
-        await message.answer(
-            "Введите ID и действие: включить, отключить или удалить. Пример: 12 отключить.",
-            reply_markup=notify_rules_action_reply(),
-        )
-        return
-    await message.answer("Нужно выбрать действие.", reply_markup=notify_rules_action_reply())
-
-
-@router.message(AdminState.rule_delay_value)
-async def admin_rule_delay_value(
-    message: Message,
-    state: FSMContext,
-    config: BotConfig,
-    sessionmaker: async_sessionmaker,
-    coc_client: CocClient,
-) -> None:
-    if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
-        return
-    if is_back(message.text):
-        await state.set_state(AdminState.rule_action)
-        await message.answer("Выберите действие.", reply_markup=notify_rules_action_reply())
-        return
-    delay_seconds = parse_duration(message.text or "")
-    if not delay_seconds:
-        await message.answer(
-            "Нужен формат: 17h 2m 34s (h — часы, m — минуты, s — секунды).",
-            reply_markup=notify_rules_action_reply(),
-        )
-        return
-    await state.update_data(rule_delay_seconds=delay_seconds)
-    await state.set_state(AdminState.rule_text)
-    await message.answer("Введите текст уведомления или '-' без текста.", reply_markup=notify_rules_action_reply())
-
-
-@router.message(AdminState.rule_text)
-async def admin_rule_text(
-    message: Message,
-    state: FSMContext,
-    config: BotConfig,
-    sessionmaker: async_sessionmaker,
-    coc_client: CocClient,
-) -> None:
-    if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
-        return
-    if is_back(message.text):
-        await state.set_state(AdminState.rule_action)
-        await message.answer("Выберите действие.", reply_markup=notify_rules_action_reply())
-        return
-    data = await state.get_data()
-    event_type = data.get("rule_event_type")
-    delay_seconds = data.get("rule_delay_seconds")
-    if event_type not in {"war", "cwl", "capital"} or not delay_seconds:
-        await state.clear()
-        missed_label = await get_missed_attacks_label(coc_client, config.clan_tag)
-        await message.answer("Админ-панель.", reply_markup=admin_menu_reply(missed_label))
-        return
-    text = (message.text or "").strip()
-    custom_text = "" if text == "-" else text
-    async with sessionmaker() as session:
-        rule = models.NotificationRule(
-            scope="chat",
-            chat_id=config.main_chat_id,
-            event_type=event_type,
-            delay_seconds=delay_seconds,
-            custom_text=custom_text,
-            is_enabled=True,
-        )
-        session.add(rule)
-        await session.flush()
-        await schedule_rule_for_active_event(session, coc_client, config, rule)
-        await session.commit()
-    await state.set_state(AdminState.rule_action)
-    await message.answer(
-        f"Уведомление добавлено: через {format_duration_ru_seconds(delay_seconds)}.",
-        reply_markup=notify_rules_action_reply(),
-    )
-
-
-@router.message(AdminState.rule_edit_id)
-async def admin_rule_edit_id(
-    message: Message,
-    state: FSMContext,
-    config: BotConfig,
-    sessionmaker: async_sessionmaker,
-    coc_client: CocClient,
-) -> None:
-    if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
-        return
-    if is_back(message.text):
-        await state.set_state(AdminState.rule_action)
-        await message.answer("Выберите действие.", reply_markup=notify_rules_action_reply())
-        return
-    if not (message.text or "").isdigit():
-        await message.answer("Нужен числовой ID.", reply_markup=notify_rules_action_reply())
-        return
-    await state.update_data(rule_edit_id=int(message.text))
-    await state.set_state(AdminState.rule_edit_delay)
-    await message.answer(
-        "Введите новую задержку (17h 2m, 90m 10s) или '-' чтобы оставить.",
-        reply_markup=notify_rules_action_reply(),
-    )
-
-
-@router.message(AdminState.rule_edit_delay)
-async def admin_rule_edit_delay(
-    message: Message,
-    state: FSMContext,
-    config: BotConfig,
-    sessionmaker: async_sessionmaker,
-    coc_client: CocClient,
-) -> None:
-    if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
-        return
-    if is_back(message.text):
-        await state.set_state(AdminState.rule_action)
-        await message.answer("Выберите действие.", reply_markup=notify_rules_action_reply())
-        return
-    text = (message.text or "").strip()
-    delay_seconds = None
-    if text != "-":
-        delay_seconds = parse_duration(text)
-        if not delay_seconds:
-            await message.answer(
-                "Нужен формат: 17h 2m 34s или '-'.",
-                reply_markup=notify_rules_action_reply(),
-            )
+    if action in {"pick", "pickdel"}:
+        if len(parts) < 3:
+            await callback.answer()
             return
-    await state.update_data(rule_edit_delay=delay_seconds)
-    await state.set_state(AdminState.rule_edit_text)
-    await message.answer("Введите новый текст или '-' чтобы оставить.", reply_markup=notify_rules_action_reply())
+        event_type = parts[2]
+        async with sessionmaker() as session:
+            rules = (
+                await session.execute(
+                    select(models.NotificationRule)
+                    .where(models.NotificationRule.chat_id == config.main_chat_id)
+                    .where(models.NotificationRule.event_type == event_type)
+                    .order_by(models.NotificationRule.created_at.desc())
+                )
+            ).scalars().all()
+        if not rules:
+            await callback.message.edit_text(
+                "Активных уведомлений нет.",
+                reply_markup=notify_rules_action_kb("an", event_type),
+            )
+            await callback.answer()
+            return
+        page_size = 5
+        visible = rules[:page_size]
+        total_pages = max(1, (len(rules) + page_size - 1) // page_size)
+        await callback.message.edit_text(
+            f"Выберите уведомление для действия.\n{_rules_table(visible)}",
+            reply_markup=notify_rule_list_kb("an", event_type, visible, 1, total_pages),
+            parse_mode=ParseMode.HTML,
+        )
+        await callback.answer()
+        return
+    if action in {"edit", "toggle", "delete", "editdelay", "edittext"}:
+        if len(parts) < 4:
+            await callback.answer()
+            return
+        event_type = parts[2]
+        rule_id = int(parts[3])
+        async with sessionmaker() as session:
+            rule = (
+                await session.execute(
+                    select(models.NotificationRule)
+                    .where(models.NotificationRule.id == rule_id)
+                    .where(models.NotificationRule.chat_id == config.main_chat_id)
+                    .where(models.NotificationRule.event_type == event_type)
+                )
+            ).scalar_one_or_none()
+            if not rule:
+                await callback.answer("Уведомление не найдено.", show_alert=True)
+                return
+            if action == "toggle":
+                rule.is_enabled = not rule.is_enabled
+                await session.commit()
+                status_text = "🔔 Включено" if rule.is_enabled else "🔕 Выключено"
+                await callback.answer(status_text)
+                await callback.message.edit_text(
+                    status_text,
+                    reply_markup=notify_rule_edit_kb("an", event_type, rule.id, rule.is_enabled),
+                )
+                return
+            if action == "delete":
+                await session.delete(rule)
+                await session.commit()
+                await callback.answer("🗑 Удалено")
+                await callback.message.edit_text(
+                    "Уведомление удалено.",
+                    reply_markup=notify_rules_action_kb("an", event_type),
+                )
+                return
+            if action == "edit":
+                await state.update_data(rule_edit_id=rule.id, rule_event_type=event_type)
+                await callback.message.edit_text(
+                    f"Уведомление #{rule.id}.",
+                    reply_markup=notify_rule_edit_kb("an", event_type, rule.id, rule.is_enabled),
+                )
+                await callback.answer()
+                return
+            if action == "editdelay":
+                await state.update_data(rule_edit_id=rule.id, rule_event_type=event_type)
+                await state.set_state(AdminState.rule_add)
+                await state.update_data(rule_delay_seconds=rule.delay_seconds, rule_delay_mode="edit")
+                await callback.message.edit_text(
+                    f"⏱ Задержка: {format_duration_ru_seconds(rule.delay_seconds)}",
+                    reply_markup=notify_delay_kb("an", event_type, rule.delay_seconds),
+                )
+                await callback.answer()
+                return
+            if action == "edittext":
+                await state.update_data(rule_edit_id=rule.id, rule_event_type=event_type)
+                await state.set_state(AdminState.rule_edit_text)
+                await callback.message.answer("Введите новый текст уведомления одним сообщением.")
+                await callback.answer()
+                return
+    await callback.answer()
+
+
+@router.message(AdminState.rule_add_text)
+async def admin_rule_add_text(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+    coc_client: CocClient,
+) -> None:
+    if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
+        return
+    text = (message.text or "").strip()
+    await state.update_data(rule_text=text)
+    state_data = await state.get_data()
+    delay_seconds = int(state_data.get("rule_delay_seconds", 0))
+    event_type = state_data.get("rule_event_type")
+    await message.answer(
+        f"⏱ Задержка: {format_duration_ru_seconds(delay_seconds)}",
+        reply_markup=notify_save_kb("an", event_type, True),
+    )
 
 
 @router.message(AdminState.rule_edit_text)
-async def admin_rule_edit_text(
+async def admin_rule_edit_text_input(
     message: Message,
     state: FSMContext,
     config: BotConfig,
@@ -1537,73 +1596,15 @@ async def admin_rule_edit_text(
 ) -> None:
     if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
         return
-    if is_back(message.text):
-        await state.set_state(AdminState.rule_action)
-        await message.answer("Выберите действие.", reply_markup=notify_rules_action_reply())
-        return
     data = await state.get_data()
-    event_type = data.get("rule_event_type")
     rule_id = data.get("rule_edit_id")
-    if event_type not in {"war", "cwl", "capital"} or not rule_id:
-        await state.clear()
-        missed_label = await get_missed_attacks_label(coc_client, config.clan_tag)
-        await message.answer("Админ-панель.", reply_markup=admin_menu_reply(missed_label))
-        return
-    new_delay = data.get("rule_edit_delay")
-    text_input = (message.text or "").strip()
-    custom_text = None if text_input == "-" else text_input
-    async with sessionmaker() as session:
-        rule = (
-            await session.execute(
-                select(models.NotificationRule)
-                .where(models.NotificationRule.id == rule_id)
-                .where(models.NotificationRule.chat_id == config.main_chat_id)
-                .where(models.NotificationRule.event_type == event_type)
-            )
-        ).scalar_one_or_none()
-        if not rule:
-            await message.answer("Уведомление не найдено.", reply_markup=notify_rules_action_reply())
-            await state.set_state(AdminState.rule_action)
-            return
-        if new_delay is not None:
-            rule.delay_seconds = new_delay
-        if custom_text is not None:
-            rule.custom_text = custom_text
-        await session.commit()
-    await state.set_state(AdminState.rule_action)
-    await message.answer("Уведомление обновлено.", reply_markup=notify_rules_action_reply())
-
-
-@router.message(AdminState.rule_toggle_delete)
-async def admin_rule_toggle_delete(
-    message: Message,
-    state: FSMContext,
-    config: BotConfig,
-    sessionmaker: async_sessionmaker,
-    coc_client: CocClient,
-) -> None:
-    if await _handle_admin_escape(message, state, config, sessionmaker, coc_client):
-        return
-    if is_back(message.text):
-        await state.set_state(AdminState.rule_action)
-        await message.answer("Выберите действие.", reply_markup=notify_rules_action_reply())
-        return
-    parts = (message.text or "").split()
-    if len(parts) < 2 or not parts[0].isdigit():
-        await message.answer(
-            "Нужен формат: ID действие (включить/отключить/удалить).",
-            reply_markup=notify_rules_action_reply(),
-        )
-        return
-    rule_id = int(parts[0])
-    action = parts[1].lower()
-    data = await state.get_data()
     event_type = data.get("rule_event_type")
-    if event_type not in {"war", "cwl", "capital"}:
+    if not rule_id or event_type not in ADMIN_EVENT_LABELS:
         await state.clear()
         missed_label = await get_missed_attacks_label(coc_client, config.clan_tag)
         await message.answer("Админ-панель.", reply_markup=admin_menu_reply(missed_label))
         return
+    text = (message.text or "").strip()
     async with sessionmaker() as session:
         rule = (
             await session.execute(
@@ -1614,25 +1615,17 @@ async def admin_rule_toggle_delete(
             )
         ).scalar_one_or_none()
         if not rule:
-            await message.answer("Уведомление не найдено.", reply_markup=notify_rules_action_reply())
+            await message.answer("Уведомление не найдено.")
+            await state.clear()
             return
-        if action.startswith("удал"):
-            await session.delete(rule)
-            await session.commit()
-            await message.answer("Уведомление удалено.", reply_markup=notify_rules_action_reply())
-            return
-        if action.startswith("откл"):
-            rule.is_enabled = False
-        elif action.startswith("вкл"):
-            rule.is_enabled = True
-        else:
-            await message.answer(
-                "Действие: включить, отключить или удалить.",
-                reply_markup=notify_rules_action_reply(),
-            )
-            return
+        template_key, _ = unpack_rule_text(rule.custom_text)
+        rule.custom_text = pack_rule_text(template_key, text)
         await session.commit()
-    await message.answer("Готово.", reply_markup=notify_rules_action_reply())
+    await state.clear()
+    await message.answer(
+        "✅ Сохранено.",
+        reply_markup=notify_rule_edit_kb("an", event_type, rule_id, rule.is_enabled),
+    )
 
 
 @router.message(AdminState.waiting_wipe_target)
