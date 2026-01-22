@@ -9,3 +9,9 @@ def hint_ack_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text=label("ack"), callback_data="hint:ok")]]
     )
+
+
+def token_help_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=label("token_help"), callback_data="hint:token")]]
+    )
