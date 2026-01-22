@@ -93,6 +93,13 @@ def label_variants(key: str) -> set[str]:
     return variants
 
 
+def all_label_variants() -> set[str]:
+    variants: set[str] = set()
+    for key in LABELS:
+        variants |= label_variants(key)
+    return variants
+
+
 def menu_text_actions() -> dict[str, str]:
     actions: dict[str, str] = {}
     for key, action in MENU_ACTIONS.items():

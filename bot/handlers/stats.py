@@ -125,8 +125,11 @@ async def mystats_command(
         ).scalar_one_or_none()
     if not user:
         await message.answer(
-            f"Вы ещё не зарегистрированы. Нажмите «{label('register')}».",
-            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+            f"Сначала зарегистрируйтесь: {label('register')}",
+            reply_markup=main_menu_reply(
+                is_admin(message.from_user.id, config),
+                is_registered=False,
+            ),
         )
         return
     try:
@@ -249,12 +252,15 @@ async def stats_refresh_button(
         user = (
             await session.execute(select(models.User).where(models.User.telegram_id == message.from_user.id))
         ).scalar_one_or_none()
-    if not user:
-        await message.answer(
-            f"Вы ещё не зарегистрированы. Нажмите «{label('register')}».",
-            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
-        )
-        return
+        if not user:
+            await message.answer(
+                f"Сначала зарегистрируйтесь: {label('register')}",
+                reply_markup=main_menu_reply(
+                    is_admin(message.from_user.id, config),
+                    is_registered=False,
+                ),
+            )
+            return
     try:
         player = await coc_client.get_player(user.player_tag)
     except Exception:  # noqa: BLE001

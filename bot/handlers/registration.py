@@ -152,7 +152,10 @@ async def register_tag(message: Message, state: FSMContext, config: BotConfig) -
         await reset_menu(state)
         await message.answer(
             "Главное меню.",
-            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+            reply_markup=main_menu_reply(
+                is_admin(message.from_user.id, config),
+                is_registered=False,
+            ),
         )
         return
     tag = normalize_tag(message.text or "")
@@ -184,7 +187,10 @@ async def register_token(
         await reset_menu(state)
         await message.answer(
             "Главное меню.",
-            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+            reply_markup=main_menu_reply(
+                is_admin(message.from_user.id, config),
+                is_registered=False,
+            ),
         )
         return
     token = (message.text or "").strip()

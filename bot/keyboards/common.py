@@ -11,9 +11,15 @@ from bot.ui.labels import (
 )
 
 
-def main_menu_inline(is_admin: bool) -> InlineKeyboardMarkup:
+def main_menu_inline(is_admin: bool, is_registered: bool = True) -> InlineKeyboardMarkup:
+    if not is_registered:
+        rows = [
+            [InlineKeyboardButton(text=label("register"), callback_data="menu:register")],
+            [InlineKeyboardButton(text=label("guide"), callback_data="menu:guide")],
+        ]
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
     rows = [
-        [InlineKeyboardButton(text=label("register"), callback_data="menu:register")],
         [InlineKeyboardButton(text=label("profile"), callback_data="menu:me")],
         [InlineKeyboardButton(text=label("mystats"), callback_data="menu:mystats")],
         [InlineKeyboardButton(text=label("notify"), callback_data="menu:notify")],
@@ -27,9 +33,19 @@ def main_menu_inline(is_admin: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def main_menu_reply(is_admin: bool) -> ReplyKeyboardMarkup:
+def main_menu_reply(is_admin: bool, is_registered: bool = True) -> ReplyKeyboardMarkup:
+    if not is_registered:
+        keyboard = [
+            [KeyboardButton(text=label("register"))],
+            [KeyboardButton(text=label("guide"))],
+        ]
+        return ReplyKeyboardMarkup(
+            keyboard=keyboard,
+            resize_keyboard=True,
+        )
+
     keyboard = [
-        [KeyboardButton(text=label("register")), KeyboardButton(text=label("profile"))],
+        [KeyboardButton(text=label("profile"))],
         [KeyboardButton(text=label("mystats")), KeyboardButton(text=label("notify"))],
         [KeyboardButton(text=label("targets")), KeyboardButton(text=label("rules"))],
         [KeyboardButton(text=label("complaint")), KeyboardButton(text=label("guide"))],

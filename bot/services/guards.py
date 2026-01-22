@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from aiogram import BaseMiddleware
+from aiogram.enums import MessageEntityType
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -13,7 +14,7 @@ from bot.db import models
 from bot.keyboards.common import main_menu_reply
 from bot.services.coc_client import CocClient
 from bot.services.permissions import is_admin
-from bot.ui.labels import label, label_variants
+from bot.ui.labels import all_label_variants, label, label_variants
 
 logger = logging.getLogger(__name__)
 
@@ -148,14 +149,35 @@ async def _deny_access(
     config: BotConfig,
     telegram_id: int,
     text: str,
+    *,
+    is_registered: bool,
 ) -> None:
-    reply_markup = main_menu_reply(is_admin(telegram_id, config))
+    reply_markup = main_menu_reply(is_admin(telegram_id, config), is_registered=is_registered)
     if isinstance(event, CallbackQuery):
         await event.answer(text)
         if event.message:
             await event.message.answer(text, reply_markup=reply_markup)
         return
     await event.answer(text, reply_markup=reply_markup)
+
+
+def _is_command_message(message: Message) -> bool:
+    if not message.text:
+        return False
+    if message.text.startswith("/"):
+        return True
+    if not message.entities:
+        return False
+    for entity in message.entities:
+        if entity.type == MessageEntityType.BOT_COMMAND and entity.offset == 0:
+            return True
+    return False
+
+
+def _is_menu_or_label_message(message: Message) -> bool:
+    if not message.text:
+        return False
+    return message.text in all_label_variants()
 
 
 class ClanAccessMiddleware(BaseMiddleware):
@@ -174,6 +196,9 @@ class ClanAccessMiddleware(BaseMiddleware):
     async def __call__(self, handler, event: Message | CallbackQuery, data: dict):
         state = data.get("state")
         state_value = await state.get_state() if state else None
+        if isinstance(event, Message):
+            if not _is_command_message(event) and not _is_menu_or_label_message(event):
+                return await handler(event, data)
         if await _is_exempt(event, state_value):
             return await handler(event, data)
         telegram_id = event.from_user.id if event.from_user else None
@@ -192,7 +217,8 @@ class ClanAccessMiddleware(BaseMiddleware):
                 event,
                 self._config,
                 telegram_id,
-                f"Вы ещё не зарегистрированы. Нажмите «{label('register')}».",
+                f"Сначала зарегистрируйтесь: {label('register')}",
+                is_registered=False,
             )
             return None
         if not is_admin(telegram_id, self._config):
@@ -206,6 +232,7 @@ class ClanAccessMiddleware(BaseMiddleware):
                         self._config,
                         telegram_id,
                         "Ваш доступ ограничен. Свяжитесь с админами.",
+                        is_registered=True,
                     )
                     return None
         if not in_clan:
@@ -219,6 +246,7 @@ class ClanAccessMiddleware(BaseMiddleware):
                 self._config,
                 telegram_id,
                 "Вы не состоите в нашем клане. Доступ ограничен.",
+                is_registered=True,
             )
             return None
         return await handler(event, data)

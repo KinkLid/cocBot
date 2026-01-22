@@ -91,8 +91,11 @@ async def _get_user_or_prompt(
         ).scalar_one_or_none()
     if not user:
         await message.answer(
-            f"Вы ещё не зарегистрированы. Нажмите «{label('register')}».",
-            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+            f"Сначала зарегистрируйтесь: {label('register')}",
+            reply_markup=main_menu_reply(
+                is_admin(message.from_user.id, config),
+                is_registered=False,
+            ),
         )
     return user
 
@@ -146,8 +149,11 @@ async def notify_command(
         ).scalar_one_or_none()
         if not user:
             await message.answer(
-                f"Вы ещё не зарегистрированы. Нажмите «{label('register')}».",
-                reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+                f"Сначала зарегистрируйтесь: {label('register')}",
+                reply_markup=main_menu_reply(
+                    is_admin(message.from_user.id, config),
+                    is_registered=False,
+                ),
             )
             return
         prefs = _normalize_notify_pref(user.notify_pref)
@@ -179,8 +185,11 @@ async def send_notify_menu(
         if not user:
             await bot.send_message(
                 chat_id=chat_id,
-                text=f"Вы ещё не зарегистрированы. Нажмите «{label('register')}».",
-                reply_markup=main_menu_reply(is_admin(user_id, config)),
+                text=f"Сначала зарегистрируйтесь: {label('register')}",
+                reply_markup=main_menu_reply(
+                    is_admin(user_id, config),
+                    is_registered=False,
+                ),
             )
             return
         prefs = _normalize_notify_pref(user.notify_pref)
@@ -255,8 +264,11 @@ async def notify_callbacks(
             ).scalar_one_or_none()
             if not user:
                 await callback.message.answer(
-                    f"Вы ещё не зарегистрированы. Нажмите «{label('register')}».",
-                    reply_markup=main_menu_reply(is_admin(callback.from_user.id, config)),
+                    f"Сначала зарегистрируйтесь: {label('register')}",
+                    reply_markup=main_menu_reply(
+                        is_admin(callback.from_user.id, config),
+                        is_registered=False,
+                    ),
                 )
                 await callback.answer()
                 return

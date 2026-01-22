@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bot.config import BotConfig
 from bot.db import models
-from bot.keyboards.common import targets_admin_reply, targets_menu_reply
+from bot.keyboards.common import main_menu_reply, targets_admin_reply, targets_menu_reply
 from bot.keyboards.targets import build_targets_keyboard, targets_admin_action_kb, targets_admin_members_kb
 from bot.services.permissions import is_admin
 from bot.services.coc_client import CocClient
@@ -595,8 +595,11 @@ async def targets_select_button(
     if not user:
         logger.info("Targets select blocked: not registered (telegram_id=%s)", message.from_user.id)
         await message.answer(
-            f"Вы ещё не зарегистрированы. Нажмите «{label('register')}».",
-            reply_markup=_menu_reply(config, message.from_user.id),
+            f"Сначала зарегистрируйтесь: {label('register')}",
+            reply_markup=main_menu_reply(
+                is_admin(message.from_user.id, config),
+                is_registered=False,
+            ),
         )
         return
     if not _is_user_in_war(user, war):
@@ -711,7 +714,7 @@ async def target_claim(
         return
     user = await _load_user(sessionmaker, user_id)
     if not user:
-        await callback.message.answer(f"Сначала зарегистрируйтесь. Нажмите «{label('register')}».")
+        await callback.message.answer(f"Сначала зарегистрируйтесь: {label('register')}")
         return
     if not _is_user_in_war(user, war):
         logger.info(
@@ -930,7 +933,7 @@ async def target_toggle(
         return
     user = await _load_user(sessionmaker, user_id)
     if not user:
-        await callback.message.answer(f"Сначала зарегистрируйтесь. Нажмите «{label('register')}».")
+        await callback.message.answer(f"Сначала зарегистрируйтесь: {label('register')}")
         return
     if not _is_user_in_war(user, war):
         logger.info(
@@ -1020,7 +1023,7 @@ async def target_admin_unclaim(
         return
     admin_user = await _load_user(sessionmaker, callback.from_user.id)
     if not admin_user:
-        await callback.message.answer(f"Сначала зарегистрируйтесь. Нажмите «{label('register')}».")
+        await callback.message.answer(f"Сначала зарегистрируйтесь: {label('register')}")
         return
     position = int(callback.data.split(":")[2])
     war = await _load_war(coc_client, config.clan_tag)
