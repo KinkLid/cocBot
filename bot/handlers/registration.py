@@ -85,7 +85,7 @@ async def _reject_if_registered(
     await message.answer(
         f"Вы уже зарегистрированы как {escaped_name} ({escaped_tag}).",
         parse_mode=ParseMode.HTML,
-        reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        reply_markup=main_menu_reply(is_admin(message.from_user.id, config), is_registered=True),
     )
     await message.answer(
         f"Повторная регистрация запрещена. Нажмите «{label('show_profile')}» или «{label('main_menu')}».",
@@ -152,7 +152,7 @@ async def register_tag(message: Message, state: FSMContext, config: BotConfig) -
         await reset_menu(state)
         await message.answer(
             "Главное меню.",
-            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config), is_registered=False),
         )
         return
     tag = normalize_tag(message.text or "")
@@ -184,7 +184,7 @@ async def register_token(
         await reset_menu(state)
         await message.answer(
             "Главное меню.",
-            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config), is_registered=False),
         )
         return
     token = (message.text or "").strip()
@@ -305,5 +305,5 @@ async def register_token(
     logger.info("registration_complete user_id=%s player_tag=%s", message.from_user.id, player_tag)
     await message.answer(
         "Регистрация завершена. Спасибо!",
-        reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        reply_markup=main_menu_reply(is_admin(message.from_user.id, config), is_registered=True),
     )

@@ -125,8 +125,11 @@ async def mystats_command(
         ).scalar_one_or_none()
     if not user:
         await message.answer(
-            f"Вы ещё не зарегистрированы. Нажмите «{label('register')}».",
-            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+            f"Сначала зарегистрируйтесь: {label('register')}.",
+            reply_markup=main_menu_reply(
+                is_admin(message.from_user.id, config),
+                is_registered=False,
+            ),
         )
         return
     try:
@@ -207,7 +210,7 @@ async def season_command(
     if not seasons:
         await message.answer(
             "Сезоны появятся после первой ЛВК.",
-            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config), is_registered=True),
         )
         return
     await message.answer("Выберите сезон:", reply_markup=seasons_kb(seasons))
@@ -251,8 +254,11 @@ async def stats_refresh_button(
         ).scalar_one_or_none()
     if not user:
         await message.answer(
-            f"Вы ещё не зарегистрированы. Нажмите «{label('register')}».",
-            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+            f"Сначала зарегистрируйтесь: {label('register')}.",
+            reply_markup=main_menu_reply(
+                is_admin(message.from_user.id, config),
+                is_registered=False,
+            ),
         )
         return
     try:

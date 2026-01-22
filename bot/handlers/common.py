@@ -37,6 +37,15 @@ logger = logging.getLogger(__name__)
 MENU_TEXT_ACTIONS = menu_text_actions()
 
 
+async def _build_main_menu_reply(
+    sessionmaker: async_sessionmaker,
+    telegram_id: int,
+    config: BotConfig,
+) -> tuple[models.User | None, bool]:
+    user = await _get_user_profile(sessionmaker, telegram_id)
+    return user, bool(user)
+
+
 @router.message(CommandStart())
 async def start_command(
     message: Message,
@@ -52,12 +61,22 @@ async def start_command(
         await start_registration(message, state, bot_username, config, sessionmaker)
         return
     invite_text = ""
+    _, is_registered = await _build_main_menu_reply(
+        sessionmaker,
+        message.from_user.id,
+        config,
+    )
     if message.chat.type == ChatType.PRIVATE:
         invite_text = await _maybe_build_invite_text(message, sessionmaker, config)
+    greeting = "Привет! Это бот клана Clash of Clans."
+    if not is_registered:
+        greeting = f"{greeting} Нажмите «{label('register')}», чтобы начать."
     await message.answer(
-        f"Привет! Это бот клана Clash of Clans. Нажмите «{label('register')}», чтобы начать."
-        f"{invite_text}",
-        reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        f"{greeting}{invite_text}",
+        reply_markup=main_menu_reply(
+            is_admin(message.from_user.id, config),
+            is_registered=is_registered,
+        ),
     )
 
 
@@ -123,8 +142,11 @@ async def me_command(
     logger.debug("profile lookup telegram_id=%s found=%s", message.from_user.id, bool(user))
     if not user:
         await message.answer(
-            f"Вы ещё не зарегистрированы. Нажмите «{label('register')}».",
-            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+            f"Сначала зарегистрируйтесь: {label('register')}.",
+            reply_markup=main_menu_reply(
+                is_admin(message.from_user.id, config),
+                is_registered=False,
+            ),
         )
         return
     extra_line = ""
@@ -196,13 +218,22 @@ async def help_command(
     state: FSMContext,
     bot_username: str,
     config: BotConfig,
+    sessionmaker: async_sessionmaker,
 ) -> None:
     await reset_state_if_any(state)
     await reset_menu(state)
+    _, is_registered = await _build_main_menu_reply(
+        sessionmaker,
+        message.from_user.id,
+        config,
+    )
     await message.answer(
         build_help_text(bot_username),
         parse_mode="HTML",
-        reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        reply_markup=main_menu_reply(
+            is_admin(message.from_user.id, config),
+            is_registered=is_registered,
+        ),
     )
 
 
@@ -211,13 +242,22 @@ async def rules_command(
     message: Message,
     state: FSMContext,
     config: BotConfig,
+    sessionmaker: async_sessionmaker,
 ) -> None:
     await reset_state_if_any(state)
     await reset_menu(state)
+    _, is_registered = await _build_main_menu_reply(
+        sessionmaker,
+        message.from_user.id,
+        config,
+    )
     await message.answer(
         build_rules_text(),
         parse_mode="HTML",
-        reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        reply_markup=main_menu_reply(
+            is_admin(message.from_user.id, config),
+            is_registered=is_registered,
+        ),
     )
 
 
@@ -227,13 +267,22 @@ async def help_button(
     state: FSMContext,
     bot_username: str,
     config: BotConfig,
+    sessionmaker: async_sessionmaker,
 ) -> None:
     await reset_state_if_any(state)
     await reset_menu(state)
+    _, is_registered = await _build_main_menu_reply(
+        sessionmaker,
+        message.from_user.id,
+        config,
+    )
     await message.answer(
         build_help_text(bot_username),
         parse_mode="HTML",
-        reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        reply_markup=main_menu_reply(
+            is_admin(message.from_user.id, config),
+            is_registered=is_registered,
+        ),
     )
 
 
@@ -252,6 +301,13 @@ async def group_menu_router(
     action = MENU_TEXT_ACTIONS.get(message.text or "")
     if not action:
         return
+    is_registered = True
+    if action in {"rules", "guide"}:
+        _, is_registered = await _build_main_menu_reply(
+            sessionmaker,
+            message.from_user.id,
+            config,
+        )
     if action == "register":
         await start_registration(message, state, bot_username, config, sessionmaker)
         return
@@ -307,14 +363,20 @@ async def group_menu_router(
         await message.answer(
             build_rules_text(),
             parse_mode=ParseMode.HTML,
-            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+            reply_markup=main_menu_reply(
+                is_admin(message.from_user.id, config),
+                is_registered=is_registered,
+            ),
         )
         return
     if action == "guide":
         await message.answer(
             build_help_text(bot_username),
             parse_mode=ParseMode.HTML,
-            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+            reply_markup=main_menu_reply(
+                is_admin(message.from_user.id, config),
+                is_registered=is_registered,
+            ),
         )
         return
     if action == "admin":
@@ -330,8 +392,13 @@ async def group_menu_router(
 
 
 @router.message(F.text.in_(label_variants("rules")))
-async def rules_button(message: Message, state: FSMContext, config: BotConfig) -> None:
-    await rules_command(message, state, config)
+async def rules_button(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+) -> None:
+    await rules_command(message, state, config, sessionmaker)
 
 
 @router.message(Command("profile"))
@@ -365,12 +432,25 @@ async def show_profile_button(
 
 
 @router.message(F.text.in_(label_variants("main_menu")))
-async def main_menu_button(message: Message, state: FSMContext, config: BotConfig) -> None:
+async def main_menu_button(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+) -> None:
     await reset_state_if_any(state)
     await reset_menu(state)
+    _, is_registered = await _build_main_menu_reply(
+        sessionmaker,
+        message.from_user.id,
+        config,
+    )
     await message.answer(
         "Главное меню.",
-        reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        reply_markup=main_menu_reply(
+            is_admin(message.from_user.id, config),
+            is_registered=is_registered,
+        ),
     )
 
 
@@ -393,9 +473,12 @@ async def menu_callbacks(
         logger.debug("profile lookup telegram_id=%s found=%s", callback.from_user.id, bool(user))
         if not user:
             await callback.message.answer(
-            f"Вы ещё не зарегистрированы. Нажмите «{label('register')}».",
-            reply_markup=main_menu_reply(is_admin(callback.from_user.id, config)),
-        )
+                f"Сначала зарегистрируйтесь: {label('register')}.",
+                reply_markup=main_menu_reply(
+                    is_admin(callback.from_user.id, config),
+                    is_registered=False,
+                ),
+            )
             return
         await callback.message.answer(
             f"Профиль: {user.player_name} ({user.player_tag})\nКлан: {user.clan_tag}",
@@ -408,24 +491,40 @@ async def menu_callbacks(
     elif callback.data == "menu:targets":
         await targets_command(callback.message, state, config, coc_client, sessionmaker)
     elif callback.data == "menu:rules":
+        _, is_registered = await _build_main_menu_reply(
+            sessionmaker,
+            callback.from_user.id,
+            config,
+        )
         await callback.message.answer(
             build_rules_text(),
             parse_mode="HTML",
-            reply_markup=main_menu_reply(is_admin(callback.from_user.id, config)),
+            reply_markup=main_menu_reply(
+                is_admin(callback.from_user.id, config),
+                is_registered=is_registered,
+            ),
         )
     elif callback.data == "menu:complaint":
         await start_complaint_flow(callback.message, state, config, coc_client)
     elif callback.data == "menu:guide":
+        _, is_registered = await _build_main_menu_reply(
+            sessionmaker,
+            callback.from_user.id,
+            config,
+        )
         await callback.message.answer(
             build_help_text(bot_username),
             parse_mode="HTML",
-            reply_markup=main_menu_reply(is_admin(callback.from_user.id, config)),
+            reply_markup=main_menu_reply(
+                is_admin(callback.from_user.id, config),
+                is_registered=is_registered,
+            ),
         )
     elif callback.data == "menu:admin":
         if not is_admin(callback.from_user.id, config):
             await callback.message.answer(
                 "Админ-панель доступна только администраторам.",
-                reply_markup=main_menu_reply(is_admin(callback.from_user.id, config)),
+                reply_markup=main_menu_reply(is_admin(callback.from_user.id, config), is_registered=True),
             )
             return
         await set_menu(state, "admin_menu")

@@ -13,11 +13,12 @@ from bot.db import models
 from bot.keyboards.common import main_menu_reply
 from bot.services.coc_client import CocClient
 from bot.services.permissions import is_admin
-from bot.ui.labels import label, label_variants
+from bot.ui.labels import LABELS, label, label_variants
 
 logger = logging.getLogger(__name__)
 
 CLAN_CHECK_TTL = timedelta(minutes=10)
+ACTION_LABELS = {variant for key in LABELS for variant in label_variants(key)}
 
 
 async def ensure_registered_and_in_clan(
@@ -90,6 +91,17 @@ async def _is_exempt(event: Message | CallbackQuery, state_value: str | None) ->
     return data in {"menu:register", "menu:guide", "menu:rules", "hint:ok"}
 
 
+def _should_guard_message(event: Message, state_value: str | None) -> bool:
+    if state_value:
+        return True
+    text = (event.text or "").strip()
+    if not text:
+        return False
+    if text.startswith("/"):
+        return True
+    return text in ACTION_LABELS
+
+
 async def _is_blacklist_exempt(event: Message | CallbackQuery, state_value: str | None) -> bool:
     if _state_is_complaint(state_value):
         return True
@@ -148,8 +160,12 @@ async def _deny_access(
     config: BotConfig,
     telegram_id: int,
     text: str,
+    is_registered: bool = True,
 ) -> None:
-    reply_markup = main_menu_reply(is_admin(telegram_id, config))
+    reply_markup = main_menu_reply(
+        is_admin(telegram_id, config),
+        is_registered=is_registered,
+    )
     if isinstance(event, CallbackQuery):
         await event.answer(text)
         if event.message:
@@ -174,6 +190,8 @@ class ClanAccessMiddleware(BaseMiddleware):
     async def __call__(self, handler, event: Message | CallbackQuery, data: dict):
         state = data.get("state")
         state_value = await state.get_state() if state else None
+        if isinstance(event, Message) and not _should_guard_message(event, state_value):
+            return await handler(event, data)
         if await _is_exempt(event, state_value):
             return await handler(event, data)
         telegram_id = event.from_user.id if event.from_user else None
@@ -192,7 +210,8 @@ class ClanAccessMiddleware(BaseMiddleware):
                 event,
                 self._config,
                 telegram_id,
-                f"Вы ещё не зарегистрированы. Нажмите «{label('register')}».",
+                f"Сначала зарегистрируйтесь: {label('register')}.",
+                is_registered=False,
             )
             return None
         if not is_admin(telegram_id, self._config):
@@ -219,6 +238,7 @@ class ClanAccessMiddleware(BaseMiddleware):
                 self._config,
                 telegram_id,
                 "Вы не состоите в нашем клане. Доступ ограничен.",
+                is_registered=True,
             )
             return None
         return await handler(event, data)
