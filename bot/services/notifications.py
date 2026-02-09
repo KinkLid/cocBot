@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 from aiogram import Bot
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select, update, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -19,7 +19,7 @@ from bot.db import models
 from bot.services.coc_client import CocClient
 from bot.services.complaints import notify_admins_complaint
 from bot.ui.labels import label
-from bot.ui.renderers import chunk_message, render_cwl_summary, render_missed_attacks
+from bot.ui.renderers import chunk_message, render_cwl_problem_summary, render_missed_attacks
 from bot.utils.coc_time import parse_coc_time
 from bot.utils.notification_events import (
     build_capital_event_key,
@@ -221,6 +221,12 @@ class NotificationService:
             value = value.replace(tzinfo=timezone.utc)
         return value.astimezone(zone).strftime("%Y-%m-%d %H:%M")
 
+    def _resolve_attacks_per_member(self, war_data: dict[str, Any]) -> int:
+        war_type = str(war_data.get("warType") or "").lower()
+        if war_type == "cwl":
+            return 1
+        return war_data.get("attacksPerMember", 2) or 2
+
     async def _send_rejoin_alert(self, payload: dict[str, Any]) -> None:
         name = html.escape(payload["name"])
         tag = html.escape(payload["tag"])
@@ -245,6 +251,21 @@ class NotificationService:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Failed to send rejoin alert to admin %s: %s", admin_id, exc)
 
+    async def _send_blacklist_alert(self, payload: dict[str, Any]) -> None:
+        name = html.escape(payload.get("name") or "Игрок")
+        tag = html.escape(payload.get("tag") or "")
+        left_at = self._format_datetime(payload.get("left_at"))
+        text = f"🚫 Игрок вышел из клана и добавлен в ЧС: {name} ({tag})\nЛивнул: {left_at}"
+        for admin_id in self._config.admin_telegram_ids:
+            try:
+                await self._bot.send_message(
+                    chat_id=admin_id,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to send blacklist alert to admin %s: %s", admin_id, exc)
+
     async def poll_clan_members(self) -> None:
         try:
             data = await self._coc.get_clan_members(self._config.clan_tag)
@@ -262,6 +283,7 @@ class NotificationService:
             states = (await session.execute(select(models.ClanMemberState))).scalars().all()
             state_map = {state.player_tag: state for state in states}
             left_tags: list[str] = []
+            blacklist_payloads: list[dict[str, Any]] = []
             rejoined_payloads: list[dict[str, Any]] = []
 
             for tag, member in current_members.items():
@@ -306,6 +328,41 @@ class NotificationService:
                     state.updated_at = now
                     left_tags.append(tag)
 
+            if left_tags:
+                whitelisted_tags: set[str] = set(
+                    (
+                        await session.execute(
+                            select(models.WhitelistPlayer.player_tag)
+                            .where(models.WhitelistPlayer.player_tag.in_(left_tags))
+                            .where(models.WhitelistPlayer.is_active.is_(True))
+                        )
+                    ).scalars().all()
+                )
+                existing_blacklist: set[str] = set(
+                    (
+                        await session.execute(
+                            select(models.BlacklistPlayer.player_tag)
+                            .where(models.BlacklistPlayer.player_tag.in_(left_tags))
+                        )
+                    ).scalars().all()
+                )
+                for tag in left_tags:
+                    if tag in whitelisted_tags or tag in existing_blacklist:
+                        continue
+                    state = state_map.get(tag)
+                    name = state.last_seen_name if state else "Игрок"
+                    session.add(
+                        models.BlacklistPlayer(
+                            player_tag=tag,
+                            reason="left",
+                            added_by_admin_id=0,
+                            left_at=now,
+                            detected_by="poller",
+                            is_active=True,
+                        )
+                    )
+                    blacklist_payloads.append({"tag": tag, "name": name, "left_at": now})
+
             if rejoined_payloads:
                 tags = [payload["tag"] for payload in rejoined_payloads]
                 whitelisted_tags: set[str] = set()
@@ -324,14 +381,17 @@ class NotificationService:
 
             await session.commit()
 
-        if left_tags or rejoined_payloads:
+        if left_tags or rejoined_payloads or blacklist_payloads:
             logger.info(
-                "Clan members updated: left=%s rejoined=%s",
+                "Clan members updated: left=%s rejoined=%s auto_blacklist=%s",
                 len(left_tags),
                 len(rejoined_payloads),
+                len(blacklist_payloads),
             )
         for payload in rejoined_payloads:
             await self._send_rejoin_alert(payload)
+        for payload in blacklist_payloads:
+            await self._send_blacklist_alert(payload)
 
     async def poll_war_state(self) -> None:
         try:
@@ -400,6 +460,8 @@ class NotificationService:
         if state in {"inWar", "warEnded"}:
             await self._process_war_attack_warnings(war_data)
 
+        if state == "warEnded":
+            await self._store_war_member_stats(war_data)
         if previous_state != state and state in {"preparation", "inWar", "warEnded"}:
             if state in {"preparation", "inWar"} and previous_state not in {"preparation", "inWar"}:
                 await self._schedule_rule_instances(
@@ -609,66 +671,156 @@ class NotificationService:
         await self._send_dm_notifications(dm_text, notify_type)
 
     async def _notify_cwl_end(self, season: str) -> None:
-        header = f"<b>🏆 ЛВК завершена ({season}). Итоги месяца:</b>"
+        header = "<b>📅 Итоги месяца</b>"
         sections = []
-        stats = await self._collect_cwl_stats()
-        if stats["war_stars"]:
-            sections.append(_format_top_list("⭐ Звёзды войны", stats["war_stars"]))
-        if stats["donations"]:
-            sections.append(_format_top_list("🎁 Донаты", stats["donations"]))
-        if stats["capital"]:
-            sections.append(_format_top_list("🏗 Вклад в столицу", stats["capital"]))
-        if not sections:
-            sections.append("Данных пока недостаточно для топов.")
-        summary_rows = await self._collect_cwl_attack_summary()
-        if summary_rows:
-            sections.append(render_cwl_summary(summary_rows))
+        tops = await self._collect_monthly_tops()
+        if tops.get("war_stars"):
+            sections.append(_format_top_list("🏆 ТОП звёзд (КВ+ЛВК)", tops["war_stars"], value_prefix="⭐️"))
+        else:
+            sections.append("🏆 ТОП звёзд (КВ+ЛВК): недостаточно данных, начнём собирать с этого месяца.")
+        if tops.get("donations"):
+            sections.append(_format_top_list("🤝 ТОП донатов войск", tops["donations"], value_prefix="🎁"))
+        else:
+            sections.append("🤝 ТОП донатов войск: недостаточно данных, начнём собирать с этого месяца.")
+        if tops.get("capital"):
+            sections.append(_format_top_list("🏗 ТОП вклада в столицу", tops["capital"], value_prefix="🪙"))
+        else:
+            sections.append("🏗 ТОП вклада в столицу: недостаточно данных, начнём собирать с этого месяца.")
+
+        problem_rows = await self._collect_cwl_problem_summary()
+        if problem_rows is not None:
+            sections.append(render_cwl_problem_summary(problem_rows))
         text = "\n\n".join([header, *sections])
         await self._send_chat_notification(text, "monthly_summary")
         await self._send_dm_notifications("ЛВК завершена. Итоги опубликованы в общем чате.", "monthly_summary")
 
-    async def _collect_cwl_stats(self) -> dict[str, list[tuple[str, int]]]:
+    async def _collect_monthly_tops(self) -> dict[str, list[tuple[str, int]]]:
         now = datetime.now(timezone.utc)
         window_start = now - timedelta(days=30)
         stats: dict[str, list[tuple[str, int]]] = {"war_stars": [], "donations": [], "capital": []}
+        current_tags = await self._get_current_clan_member_tags()
+
         async with self._sessionmaker() as session:
-            users = (await session.execute(select(models.User))).scalars().all()
+            war_rows = (
+                await session.execute(
+                    select(
+                        models.WarMemberStats.player_tag,
+                        models.WarMemberStats.player_name,
+                        models.WarMemberStats.stars,
+                    )
+                    .join(models.War, models.War.war_tag == models.WarMemberStats.war_tag)
+                    .where(
+                        or_(
+                            models.War.end_at >= window_start,
+                            models.War.start_at >= window_start,
+                        )
+                    )
+                )
+            ).all()
+            if war_rows:
+                stars_totals: dict[str, dict[str, Any]] = defaultdict(lambda: {"name": "Игрок", "stars": 0})
+                for row in war_rows:
+                    tag = row.player_tag
+                    stars_totals[tag]["name"] = row.player_name
+                    stars_totals[tag]["stars"] += row.stars or 0
+                stats["war_stars"] = [
+                    (_format_member_label(tag, entry["name"], current_tags), entry["stars"])
+                    for tag, entry in stars_totals.items()
+                    if entry["stars"] > 0
+                ]
+
             snapshots = (
                 await session.execute(
-                    select(models.StatsDaily)
-                    .where(models.StatsDaily.captured_at >= window_start)
-                    .order_by(models.StatsDaily.captured_at.asc())
+                    select(models.MemberDailyStat)
+                    .where(models.MemberDailyStat.captured_at >= window_start)
+                    .order_by(models.MemberDailyStat.captured_at.asc())
                 )
             ).scalars().all()
-        per_user: dict[int, list[models.StatsDaily]] = defaultdict(list)
+        per_member: dict[str, list[models.MemberDailyStat]] = defaultdict(list)
         for snap in snapshots:
-            per_user[snap.telegram_id].append(snap)
-        for user in users:
-            user_snaps = per_user.get(user.telegram_id, [])
-            if len(user_snaps) >= 2:
-                first = user_snaps[0].payload
-                last = user_snaps[-1].payload
-                war_delta = (last.get("war_stars", 0) or 0) - (first.get("war_stars", 0) or 0)
-                donate_delta = (last.get("donations", 0) or 0) - (first.get("donations", 0) or 0)
-                if war_delta > 0:
-                    stats["war_stars"].append((user.player_name, war_delta))
-                if donate_delta > 0:
-                    stats["donations"].append((user.player_name, donate_delta))
-        try:
-            raids = await self._coc.get_capital_raid_seasons(self._config.clan_tag)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Failed to load capital raids: %s", exc)
-        else:
-            items = raids.get("items", [])
-            if items:
-                latest = items[0]
-                for member in latest.get("members", []):
-                    stats["capital"].append(
-                        (member.get("name", "Игрок"), member.get("capitalResourcesLooted", 0))
+            per_member[snap.player_tag].append(snap)
+        donation_rows: list[tuple[str, int]] = []
+        capital_rows: list[tuple[str, int]] = []
+        for tag, snaps in per_member.items():
+            if len(snaps) < 2:
+                continue
+            first = snaps[0]
+            last = snaps[-1]
+            donation_delta = (last.donations_total or 0) - (first.donations_total or 0)
+            if donation_delta > 0:
+                donation_rows.append(
+                    (
+                        _format_member_label(tag, last.player_name, current_tags),
+                        donation_delta,
                     )
-        for key in stats:
-            stats[key] = sorted(stats[key], key=lambda x: x[1], reverse=True)[:5]
+                )
+            capital_delta = (last.capital_contributions_total or 0) - (first.capital_contributions_total or 0)
+            if capital_delta > 0:
+                capital_rows.append(
+                    (
+                        _format_member_label(tag, last.player_name, current_tags),
+                        capital_delta,
+                    )
+                )
+
+        stats["donations"] = sorted(donation_rows, key=lambda x: x[1], reverse=True)[:10]
+        stats["capital"] = sorted(capital_rows, key=lambda x: x[1], reverse=True)[:10]
+        stats["war_stars"] = sorted(stats["war_stars"], key=lambda x: x[1], reverse=True)[:10]
         return stats
+
+    async def _get_current_clan_member_tags(self) -> set[str]:
+        try:
+            data = await self._coc.get_clan_members(self._config.clan_tag)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to load clan members for monthly summary: %s", exc)
+            return set()
+        tags = set()
+        for member in data.get("items", []):
+            tag = normalize_tag(member.get("tag", ""))
+            if tag:
+                tags.add(tag)
+        return tags
+
+    async def _collect_cwl_problem_summary(self) -> list[dict[str, Any]] | None:
+        try:
+            league = await self._coc.get_league_group(self._config.clan_tag)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to load CWL league group for problem summary: %s", exc)
+            return None
+        current_tags = await self._get_current_clan_member_tags()
+        totals: dict[str, dict[str, Any]] = {}
+        for round_item in league.get("rounds", []):
+            for tag in round_item.get("warTags", []):
+                if tag and tag != "#0":
+                    try:
+                        war_data = await self._coc.get_cwl_war(tag)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    clan, _ = _resolve_war_sides(war_data, self._config.clan_tag)
+                    members = clan.get("members", [])
+                    for member in members:
+                        player_tag = normalize_tag(member.get("tag", ""))
+                        if not player_tag:
+                            continue
+                        entry = totals.setdefault(
+                            player_tag,
+                            {
+                                "name": member.get("name", "Игрок"),
+                                "wars": 0,
+                                "attacks": 0,
+                            },
+                        )
+                        entry["name"] = member.get("name", entry["name"])
+                        entry["wars"] += 1
+                        attacks = member.get("attacks", [])
+                        used = len(attacks) if isinstance(attacks, list) else int(attacks or 0)
+                        entry["attacks"] += used
+        rows = []
+        for tag, entry in totals.items():
+            if entry["wars"] > 2 and entry["attacks"] <= 1 and tag in current_tags:
+                rows.append({"name": entry["name"], "wars": entry["wars"], "attacks": entry["attacks"]})
+        rows.sort(key=lambda item: (-item["wars"], item["attacks"], item["name"]))
+        return rows
 
     async def _sync_cwl_war(self, war: dict[str, Any], season: str) -> None:
         war_tag = war.get("tag")
@@ -718,6 +870,74 @@ class NotificationService:
                 if state == "warEnded":
                     await self._cancel_rule_instances(session, event_key or war_tag)
                 await session.commit()
+        if state == "warEnded":
+            await self._store_war_member_stats(war)
+
+    async def _store_war_member_stats(self, war_data: dict[str, Any]) -> None:
+        war_tag = war_data.get("tag") or war_data.get("clan", {}).get("tag")
+        if not war_tag:
+            return
+        war_type = war_data.get("warType", "unknown")
+        start_at = parse_coc_time(war_data.get("startTime"))
+        end_at = parse_coc_time(war_data.get("endTime"))
+        clan, _ = _resolve_war_sides(war_data, self._config.clan_tag)
+        attacks_per_member = self._resolve_attacks_per_member(war_data)
+        members = clan.get("members", [])
+        async with self._sessionmaker() as session:
+            war_row = (
+                await session.execute(select(models.War).where(models.War.war_tag == war_tag))
+            ).scalar_one_or_none()
+            if not war_row:
+                war_row = models.War(
+                    war_tag=war_tag,
+                    war_type=war_type,
+                    state=war_data.get("state", "unknown"),
+                    start_at=start_at,
+                    end_at=end_at,
+                    opponent_name=war_data.get("opponent", {}).get("name"),
+                    opponent_tag=war_data.get("opponent", {}).get("tag"),
+                    league_name=war_data.get("league", {}).get("name"),
+                )
+                session.add(war_row)
+            else:
+                war_row.war_type = war_type or war_row.war_type
+                war_row.state = war_data.get("state", war_row.state)
+                war_row.start_at = start_at or war_row.start_at
+                war_row.end_at = end_at or war_row.end_at
+                war_row.opponent_name = war_data.get("opponent", {}).get("name") or war_row.opponent_name
+                war_row.opponent_tag = war_data.get("opponent", {}).get("tag") or war_row.opponent_tag
+                war_row.league_name = war_data.get("league", {}).get("name") or war_row.league_name
+
+            existing_tags = set(
+                (
+                    await session.execute(
+                        select(models.WarMemberStats.player_tag)
+                        .where(models.WarMemberStats.war_tag == war_tag)
+                    )
+                ).scalars().all()
+            )
+            for member in members:
+                player_tag = normalize_tag(member.get("tag", ""))
+                if not player_tag or player_tag in existing_tags:
+                    continue
+                attacks = member.get("attacks", [])
+                if isinstance(attacks, list):
+                    attacks_used = len(attacks)
+                    stars = sum(attack.get("stars", 0) for attack in attacks)
+                else:
+                    attacks_used = int(attacks or member.get("attacksUsed", 0) or 0)
+                    stars = int(member.get("stars", 0) or 0)
+                session.add(
+                    models.WarMemberStats(
+                        war_tag=war_tag,
+                        player_tag=player_tag,
+                        player_name=member.get("name", "Игрок"),
+                        stars=stars,
+                        attacks_used=attacks_used,
+                        attacks_available=attacks_per_member,
+                    )
+                )
+            await session.commit()
 
     async def _find_current_cwl_war(self, league: dict[str, Any]) -> dict[str, Any] | None:
         rounds = league.get("rounds", [])
@@ -1158,14 +1378,22 @@ class NotificationService:
                 attacker_line = f"Атаковал: {violation['attacker_name']} ({violation['attacker_tag']})"
                 if attacker_tg:
                     attacker_line = f"{attacker_line} / {attacker_tg}"
-                complaint_lines = [
-                    attacker_line,
-                    (
+                complaint_lines = [attacker_line]
+                if violation.get("position_violation"):
+                    complaint_lines.append(
+                        f"Виновник: #{violation['attacker_position']} "
+                        f"{violation['attacker_name']} ({violation['attacker_tag']})"
+                    )
+                    complaint_lines.append(
+                        f"Атаковал: #{violation['defender_position']} "
+                        f"{violation['defender_name']} ({violation['defender_tag']})"
+                    )
+                else:
+                    complaint_lines.append(
                         "Цель: "
                         f"#{violation['defender_position']} "
                         f"{violation['defender_name']} ({violation['defender_tag']})"
-                    ),
-                ]
+                    )
                 if claim_owner_label:
                     complaint_lines.append(f"Цель занята: {claim_owner_label}")
                 if reason_line:
@@ -1192,16 +1420,23 @@ class NotificationService:
         for complaint, violation in created:
             await notify_admins_complaint(self._bot, self._config, complaint)
             warning_lines = ["<b>⚠️ Предупреждение</b>"]
+            if violation.get("position_violation"):
+                warning_lines = [
+                    "<b>⚠️ Нарушение: атака ниже чем на 10 позиций (первые 12 часов)</b>",
+                    (
+                        f"Виновник: #{violation['attacker_position']} "
+                        f"({violation['attacker_name']})"
+                    ),
+                    (
+                        f"Атаковал: #{violation['defender_position']} "
+                        f"({violation['defender_name']})"
+                    ),
+                    "По правилам можно не ниже чем на 10 позиций.",
+                ]
             if violation.get("claim_violation"):
                 warning_lines.append(
                     f"Вы атаковали занятую цель #{violation['defender_position']}."
                 )
-            if violation.get("position_violation"):
-                warning_lines.append(
-                    f"Вы атаковали цель #{violation['defender_position']}, "
-                    f"хотя ваша позиция #{violation['attacker_position']}."
-                )
-                warning_lines.append("По правилам можно не ниже чем на 10 позиций.")
             warning_lines.append("Если это ошибка — напишите админам через кнопку «Жалоба».")
             await self._send_warning_dm(violation["attacker_tag"], "\n".join(warning_lines))
 
@@ -1221,7 +1456,7 @@ class NotificationService:
                         continue
                     clan, _ = _resolve_war_sides(war_data, self._config.clan_tag)
                     members = clan.get("members", [])
-                    attacks_per_member = war_data.get("attacksPerMember", 2) or 2
+                    attacks_per_member = self._resolve_attacks_per_member(war_data)
                     for member in members:
                         name = member.get("name", "Игрок")
                         attacks = member.get("attacks", [])
@@ -1532,13 +1767,21 @@ def _build_war_progress_snapshot(war_data: dict[str, Any], clan_tag: str) -> str
     return "\n".join(lines)
 
 
-def _format_top_list(title: str, items: list[tuple[str, int]]) -> str:
+def _format_member_label(tag: str, name: str, current_tags: set[str]) -> str:
+    suffix = ""
+    if current_tags and tag not in current_tags:
+        suffix = " (не в клане)"
+    return f"{name}{suffix}"
+
+
+def _format_top_list(title: str, items: list[tuple[str, int]], value_prefix: str | None = None) -> str:
     if not items:
         return f"{title}: нет данных."
     lines = [f"<b>{html.escape(title)}</b>"]
     for index, (name, value) in enumerate(items, start=1):
         safe_name = html.escape(name)
-        lines.append(f"{index}. {safe_name} — {value}")
+        prefix = f"{value_prefix} " if value_prefix else ""
+        lines.append(f"{index}) {safe_name} — {prefix}{value}")
     return "\n".join(lines)
 
 

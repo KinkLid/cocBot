@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bot.db import models
 from bot.services.coc_client import CocClient
+from bot.utils.validators import normalize_tag
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,7 @@ class StatsCollector:
         self._clan_tag = clan_tag
 
     async def collect_daily_snapshots(self) -> None:
+        now = datetime.utcnow()
         async with self._sessionmaker() as session:
             users = (await session.execute(select(models.User))).scalars().all()
             for user in users:
@@ -39,10 +41,33 @@ class StatsCollector:
                 session.add(
                     models.StatsDaily(
                         telegram_id=user.telegram_id,
-                        captured_at=datetime.utcnow(),
+                        captured_at=now,
                         payload=payload,
                     )
                 )
+            try:
+                clan_data = await self._coc.get_clan_members(self._clan_tag)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to load clan members for snapshots: %s", exc)
+            else:
+                for member in clan_data.get("items", []):
+                    tag = normalize_tag(member.get("tag", ""))
+                    if not tag:
+                        continue
+                    session.add(
+                        models.MemberDailyStat(
+                            player_tag=tag,
+                            player_name=member.get("name", "Игрок"),
+                            donations_total=member.get("donations") or 0,
+                            donations_received_total=member.get("donationsReceived") or 0,
+                            capital_contributions_total=(
+                                member.get("capitalContributions")
+                                or member.get("capitalContribution")
+                                or 0
+                            ),
+                            captured_at=now,
+                        )
+                    )
             await session.commit()
 
     async def refresh_current_war(self) -> None:

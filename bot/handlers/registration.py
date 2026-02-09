@@ -25,6 +25,7 @@ from bot.utils.navigation import reset_menu
 from bot.utils.state import reset_state_if_any
 from bot.utils.tokens import hash_token, mask_token, normalize_token
 from bot.utils.validators import is_valid_tag, normalize_tag
+from bot.utils.chat_invite import build_main_chat_invite_text
 from bot.utils.telegram import build_bot_dm_keyboard, build_bot_dm_link, try_send_dm
 
 logger = logging.getLogger(__name__)
@@ -229,7 +230,8 @@ async def register_token(
         )
         await message.answer(
             "Токен пустой или не распознан. Проверьте, что отправили токен из игры "
-            "(Настройки → Доп. настройки → API Token).",
+            "(Настройки → Доп. настройки → API Token).\n"
+            "Если не получается — напиши @kinklid.",
             reply_markup=registration_reply(),
         )
         return
@@ -240,7 +242,8 @@ async def register_token(
     except Exception as exc:  # noqa: BLE001
         logger.warning("coc_verify_fail user_id=%s player_tag=%s error=%s", message.from_user.id, player_tag, exc)
         await message.answer(
-            "Не удалось проверить токен. Попробуйте позже.",
+            "Не удалось проверить токен. Попробуйте позже.\n"
+            "Если не получается — напиши @kinklid.",
             reply_markup=registration_reply(),
         )
         return
@@ -255,7 +258,8 @@ async def register_token(
         )
         await message.answer(
             "Токен не подходит. Убедитесь, что это токен из игры (Настройки → Доп. настройки → API Token). "
-            "Ключ разработчика Clash Developers не подходит.",
+            "Ключ разработчика Clash Developers не подходит.\n"
+            "Если не получается — напиши @kinklid.",
             reply_markup=registration_reply(),
         )
         return
@@ -268,7 +272,8 @@ async def register_token(
     except Exception as exc:  # noqa: BLE001
         logger.warning("coc_fetch_player_fail user_id=%s player_tag=%s error=%s", message.from_user.id, player_tag, exc)
         await message.answer(
-            "Не удалось получить профиль игрока.",
+            "Не удалось получить профиль игрока.\n"
+            "Если не получается — напиши @kinklid.",
             reply_markup=registration_reply(),
         )
         return
@@ -283,7 +288,8 @@ async def register_token(
             clan_tag,
         )
         await message.answer(
-            "Игрок не состоит в этом клане.",
+            "Игрок не состоит в этом клане.\n"
+            "Если не получается — напиши @kinklid.",
             reply_markup=registration_reply(),
         )
         return
@@ -339,7 +345,8 @@ async def register_token(
             exc,
         )
         await message.answer(
-            "Не удалось сохранить данные. Попробуйте позже.",
+            "Не удалось сохранить данные. Попробуйте позже.\n"
+            "Если не получается — напиши @kinklid.",
             reply_markup=registration_reply(),
         )
         return
@@ -348,6 +355,6 @@ async def register_token(
     await state.clear()
     logger.info("registration_complete user_id=%s player_tag=%s", message.from_user.id, player_tag)
     await message.answer(
-        "Регистрация завершена. Спасибо!",
+        f"✅ Регистрация успешна.\n{build_main_chat_invite_text(config)}\nДобро пожаловать!",
         reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
     )
