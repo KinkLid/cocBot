@@ -112,6 +112,10 @@ class War(Base):
     league_name: Mapped[Optional[str]] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
+    participations: Mapped[list[WarParticipation]] = relationship(
+        "WarParticipation", back_populates="war", cascade="all, delete-orphan"
+    )
+
 
 class WarMemberStats(Base):
     __tablename__ = "war_member_stats"
@@ -131,7 +135,7 @@ class WarMemberStats(Base):
     )
 
     participations: Mapped[list[WarParticipation]] = relationship(
-        "WarParticipation", back_populates="war", cascade="all, delete-orphan"
+        "WarParticipation", back_populates="member_stats", cascade="all, delete-orphan"
     )
 
 
@@ -140,6 +144,7 @@ class WarParticipation(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     war_id: Mapped[int] = mapped_column(Integer, ForeignKey("wars.id"))
+    member_stats_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("war_member_stats.id"))
     telegram_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.telegram_id"))
     attacks_used: Mapped[int] = mapped_column(Integer, default=0)
     attacks_available: Mapped[int] = mapped_column(Integer, default=0)
@@ -148,6 +153,9 @@ class WarParticipation(Base):
     missed_attacks: Mapped[int] = mapped_column(Integer, default=0)
 
     war: Mapped[War] = relationship("War", back_populates="participations")
+    member_stats: Mapped[Optional[WarMemberStats]] = relationship(
+        "WarMemberStats", back_populates="participations"
+    )
     user: Mapped[User] = relationship("User", back_populates="war_participations")
 
 
