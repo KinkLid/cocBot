@@ -7,7 +7,11 @@ import html
 def collect_missed_attacks(war_data: dict[str, Any]) -> list[dict[str, Any]]:
     clan = war_data.get("clan", {})
     members = clan.get("members", [])
-    attacks_per_member = war_data.get("attacksPerMember", 2) or 2
+    war_type = str(war_data.get("warType") or "").lower()
+    if war_type == "cwl":
+        attacks_per_member = 1
+    else:
+        attacks_per_member = war_data.get("attacksPerMember", 2) or 2
     missed: list[dict[str, Any]] = []
     for member in members:
         attacks_raw = member.get("attacks")

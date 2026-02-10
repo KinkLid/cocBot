@@ -202,3 +202,17 @@ def render_cwl_summary(rows: list[dict[str, Any]]) -> str:
         extra = "✅ без пропусков" if missed == 0 else f"⚠️ пропуск {missed}"
         cards.append(format_missed_attack_card(name, None, used, available, extra=extra))
     return "\n\n".join(["<b>⚔️ Атаки за ЛВК</b>", render_cards(cards)])
+
+
+def render_cwl_problem_summary(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return "✅ ЛВК: проблем с атаками не выявлено."
+    lines = [
+        "⚠️ ЛВК: проблемы с атаками (участвовали >2 войн, атак ≤1, сейчас в клане)",
+    ]
+    for entry in rows:
+        name = html.escape(entry.get("name", "Игрок"))
+        wars = entry.get("wars", 0)
+        attacks = entry.get("attacks", 0)
+        lines.append(f"• {name} (wars: {wars}, attacks: {attacks})")
+    return "\n".join(lines)

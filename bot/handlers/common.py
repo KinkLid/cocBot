@@ -29,6 +29,7 @@ from bot.ui.labels import label, label_variants, menu_text_actions
 from bot.utils.navigation import reset_menu, set_menu
 from bot.utils.war_state import get_missed_attacks_label
 from bot.utils.state import reset_state_if_any
+from bot.utils.chat_invite import build_main_chat_invite_text
 from bot.utils.telegram import build_bot_dm_keyboard, build_bot_dm_link, try_send_dm
 
 router = Router()
@@ -98,11 +99,9 @@ async def _maybe_build_invite_text(
                 select(models.User).where(models.User.telegram_id == message.from_user.id)
             )
         ).scalar_one_or_none()
-        needs_hint = (
-            user is None
-            or not user.last_seen_in_main_chat
-            or not user.main_chat_member_check_ok
-        )
+        if user is None:
+            return ""
+        needs_hint = not user.last_seen_in_main_chat or not user.main_chat_member_check_ok
         if not needs_hint:
             return ""
         try:
@@ -111,20 +110,14 @@ async def _maybe_build_invite_text(
                 user_id=message.from_user.id,
             )
             if member.status in {ChatMemberStatus.LEFT, ChatMemberStatus.KICKED}:
-                return (
-                    "\n\nЕсли вы не в чате клана — вступайте сюда: "
-                    "https://t.me/+7_RomfG9Dn9mYTVi"
-                )
+                return f"\n\n{build_main_chat_invite_text(config)}"
             if user:
                 user.last_seen_in_main_chat = datetime.now(timezone.utc)
                 user.main_chat_member_check_ok = True
                 await session.commit()
             return ""
         except (TelegramBadRequest, TelegramForbiddenError):
-            return (
-                "\n\nЕсли вы не в чате клана — вступайте сюда: "
-                "https://t.me/+7_RomfG9Dn9mYTVi"
-            )
+            return f"\n\n{build_main_chat_invite_text(config)}"
 
 @router.message(Command("me"))
 async def me_command(

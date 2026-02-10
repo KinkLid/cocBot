@@ -19,7 +19,8 @@ def normalize_token(token: str) -> str:
         if "token" in left.lower() or "токен" in left.lower():
             cleaned = right.strip()
     cleaned = cleaned.strip().strip(TOKEN_QUOTE_CHARS).strip()
-    cleaned = re.sub(r"\s+", "", cleaned)
+    cleaned = cleaned.replace("token=", "").replace("Token=", "").replace("TOKEN=", "")
+    cleaned = re.sub(r"[\s\u200b\u200c\u200d]+", "", cleaned)
     return cleaned
 
 

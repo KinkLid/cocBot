@@ -84,6 +84,20 @@ class StatsDaily(Base):
     payload: Mapped[dict] = mapped_column(JSONB, default=dict)
 
 
+class MemberDailyStat(Base):
+    __tablename__ = "member_daily_stats"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    player_tag: Mapped[str] = mapped_column(String(16))
+    player_name: Mapped[str] = mapped_column(String(64))
+    donations_total: Mapped[int] = mapped_column(Integer, default=0)
+    donations_received_total: Mapped[int] = mapped_column(Integer, default=0)
+    capital_contributions_total: Mapped[int] = mapped_column(Integer, default=0)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+    __table_args__ = (Index("idx_member_daily_stats_tag_date", "player_tag", "captured_at"),)
+
+
 class War(Base):
     __tablename__ = "wars"
 
@@ -97,6 +111,24 @@ class War(Base):
     opponent_tag: Mapped[Optional[str]] = mapped_column(String(16))
     league_name: Mapped[Optional[str]] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class WarMemberStats(Base):
+    __tablename__ = "war_member_stats"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    war_tag: Mapped[str] = mapped_column(String(32))
+    player_tag: Mapped[str] = mapped_column(String(16))
+    player_name: Mapped[str] = mapped_column(String(64))
+    stars: Mapped[int] = mapped_column(Integer, default=0)
+    attacks_used: Mapped[int] = mapped_column(Integer, default=0)
+    attacks_available: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("war_tag", "player_tag", name="uq_war_member_stats"),
+        Index("idx_war_member_stats_war", "war_tag"),
+    )
 
     participations: Mapped[list[WarParticipation]] = relationship(
         "WarParticipation", back_populates="war", cascade="all, delete-orphan"
@@ -358,6 +390,8 @@ class BlacklistPlayer(Base):
     player_tag: Mapped[str] = mapped_column(String(16), unique=True)
     reason: Mapped[Optional[str]] = mapped_column(Text)
     added_by_admin_id: Mapped[int] = mapped_column(BigInteger)
+    left_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    detected_by: Mapped[Optional[str]] = mapped_column(String(32))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
