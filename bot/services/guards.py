@@ -15,6 +15,7 @@ from bot.keyboards.common import main_menu_reply
 from bot.services.coc_client import CocClient
 from bot.services.permissions import is_admin
 from bot.ui.labels import all_label_variants, label, label_variants
+from bot.utils.telegram import build_bot_dm_link
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +76,7 @@ def _state_is_complaint(state_value: str | None) -> bool:
 async def _is_exempt(event: Message | CallbackQuery, state_value: str | None) -> bool:
     if _state_is_registration(state_value):
         return True
-    if isinstance(event, Message):
+    if hasattr(event, "chat"):
         text = (event.text or "").strip()
         if text.startswith(("/start", "/help", "/register")):
             return True
@@ -94,7 +95,7 @@ async def _is_exempt(event: Message | CallbackQuery, state_value: str | None) ->
 async def _is_blacklist_exempt(event: Message | CallbackQuery, state_value: str | None) -> bool:
     if _state_is_complaint(state_value):
         return True
-    if isinstance(event, Message):
+    if hasattr(event, "chat"):
         text = (event.text or "").strip()
         if text.startswith(("/help", "/rules", "/complaint")):
             return True
@@ -153,7 +154,7 @@ async def _deny_access(
     is_registered: bool,
 ) -> None:
     reply_markup = main_menu_reply(is_admin(telegram_id, config), is_registered=is_registered)
-    if isinstance(event, CallbackQuery):
+    if hasattr(event, "data") and hasattr(event, "message"):
         await event.answer(text)
         if event.message:
             await event.message.answer(text, reply_markup=reply_markup)
@@ -166,9 +167,10 @@ def _is_command_message(message: Message) -> bool:
         return False
     if message.text.startswith("/"):
         return True
-    if not message.entities:
+    entities = getattr(message, "entities", None)
+    if not entities:
         return False
-    for entity in message.entities:
+    for entity in entities:
         if entity.type == MessageEntityType.BOT_COMMAND and entity.offset == 0:
             return True
     return False
@@ -196,7 +198,26 @@ class ClanAccessMiddleware(BaseMiddleware):
     async def __call__(self, handler, event: Message | CallbackQuery, data: dict):
         state = data.get("state")
         state_value = await state.get_state() if state else None
-        if isinstance(event, Message):
+        if hasattr(event, "data") and hasattr(event, "message"):
+            if event.message and event.message.chat.type in {"group", "supergroup"}:
+                return None
+        if hasattr(event, "chat") and event.chat.type in {"group", "supergroup"}:
+            if not _is_command_message(event):
+                return None
+            telegram_id = event.from_user.id if event.from_user else None
+            if telegram_id is None or not is_admin(telegram_id, self._config):
+                return None
+            bot_username = data.get("bot_username") or ""
+            link = build_bot_dm_link(bot_username)
+            try:
+                await event.bot.send_message(
+                    chat_id=telegram_id,
+                    text=f"Команда из общего чата принята. Продолжайте в ЛС: {link}",
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.info("Failed to notify admin in DM from group command: %s", exc)
+            return None
+        if hasattr(event, "chat"):
             if not _is_command_message(event) and not _is_menu_or_label_message(event):
                 return await handler(event, data)
         if await _is_exempt(event, state_value):

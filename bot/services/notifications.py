@@ -75,6 +75,10 @@ DEFAULT_DM_CATEGORIES = {
 }
 
 
+def _group_notify_allowed(notify_type: str) -> bool:
+    return notify_type == "monthly_summary"
+
+
 def _format_tg_user(user: models.User | None) -> str | None:
     if not user:
         return None
@@ -1061,8 +1065,12 @@ class NotificationService:
                 if rule.scope == "dm":
                     await self._send_rule_dm(rule, text)
                 else:
+                    target_chat_id = rule.chat_id or self._config.main_chat_id
+                    if target_chat_id == self._config.main_chat_id:
+                        instance.status = "canceled"
+                        continue
                     await self._bot.send_message(
-                        chat_id=rule.chat_id or self._config.main_chat_id,
+                        chat_id=target_chat_id,
                         text=text,
                         parse_mode=ParseMode.HTML,
                     )
@@ -1519,6 +1527,8 @@ class NotificationService:
                 logger.info("Disabled DM notifications for telegram_id=%s", user.telegram_id)
 
     async def _send_chat_notification(self, text: str, notify_type: str) -> None:
+        if not _group_notify_allowed(notify_type):
+            return
         if await self._chat_type_enabled(notify_type):
             for chunk in chunk_message(text):
                 await self._bot.send_message(
