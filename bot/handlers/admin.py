@@ -400,7 +400,15 @@ async def admin_panel_button(
         return
     await reset_menu(state)
     await set_menu(state, "admin_menu")
-    missed_label = await get_missed_attacks_label(coc_client, config.clan_tag)
+    try:
+        missed_label = await get_missed_attacks_label(coc_client, config.clan_tag)
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to open admin panel for telegram_id=%s", message.from_user.id)
+        await message.answer(
+            "Не удалось открыть админ-панель из-за внутренней ошибки. Попробуйте снова позже.",
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        )
+        return
     await message.answer("Админ-панель.", reply_markup=admin_menu_reply(missed_label))
 
 

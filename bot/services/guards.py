@@ -204,6 +204,8 @@ class ClanAccessMiddleware(BaseMiddleware):
         telegram_id = event.from_user.id if event.from_user else None
         if telegram_id is None:
             return await handler(event, data)
+        if is_admin(telegram_id, self._config):
+            return await handler(event, data)
         user, in_clan = await ensure_registered_and_in_clan(
             telegram_id,
             self._config,

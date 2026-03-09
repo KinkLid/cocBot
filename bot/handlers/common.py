@@ -464,7 +464,15 @@ async def menu_callbacks(
             )
             return
         await set_menu(state, "admin_menu")
-        missed_label = await get_missed_attacks_label(coc_client, config.clan_tag)
+        try:
+            missed_label = await get_missed_attacks_label(coc_client, config.clan_tag)
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to open admin panel from callback for telegram_id=%s", callback.from_user.id)
+            await callback.message.answer(
+                "Не удалось открыть админ-панель из-за внутренней ошибки. Попробуйте снова позже.",
+                reply_markup=main_menu_reply(is_admin(callback.from_user.id, config)),
+            )
+            return
         await callback.message.answer("Админ-панель.", reply_markup=admin_menu_reply(missed_label))
 
 
