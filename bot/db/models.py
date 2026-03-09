@@ -134,8 +134,12 @@ class WarMemberStats(Base):
         Index("idx_war_member_stats_war", "war_tag"),
     )
 
-    participations: Mapped[list[WarParticipation]] = relationship(
-        "WarParticipation", back_populates="member_stats", cascade="all, delete-orphan"
+    participations: Mapped[list["WarParticipation"]] = relationship(
+        "WarParticipation",
+        back_populates="member_stats",
+        cascade="all, delete-orphan",
+        foreign_keys="WarParticipation.member_stats_id",
+        primaryjoin="WarMemberStats.id == foreign(WarParticipation.member_stats_id)",
     )
 
 
@@ -144,7 +148,11 @@ class WarParticipation(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     war_id: Mapped[int] = mapped_column(Integer, ForeignKey("wars.id"))
-    member_stats_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("war_member_stats.id"))
+    member_stats_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey("war_member_stats.id"),
+        nullable=True,
+    )
     telegram_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.telegram_id"))
     attacks_used: Mapped[int] = mapped_column(Integer, default=0)
     attacks_available: Mapped[int] = mapped_column(Integer, default=0)
@@ -152,11 +160,14 @@ class WarParticipation(Base):
     destruction: Mapped[int] = mapped_column(Integer, default=0)
     missed_attacks: Mapped[int] = mapped_column(Integer, default=0)
 
-    war: Mapped[War] = relationship("War", back_populates="participations")
-    member_stats: Mapped[Optional[WarMemberStats]] = relationship(
-        "WarMemberStats", back_populates="participations"
+    war: Mapped["War"] = relationship("War", back_populates="participations")
+    member_stats: Mapped[Optional["WarMemberStats"]] = relationship(
+        "WarMemberStats",
+        back_populates="participations",
+        foreign_keys=[member_stats_id],
+        primaryjoin="foreign(WarParticipation.member_stats_id) == WarMemberStats.id",
     )
-    user: Mapped[User] = relationship("User", back_populates="war_participations")
+    user: Mapped["User"] = relationship("User", back_populates="war_participations")
 
 
 class CapitalRaidSeason(Base):
