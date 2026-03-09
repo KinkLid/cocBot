@@ -1168,6 +1168,24 @@ async def admin_notify_menu(
     await _show_admin_notify_menu(message, state, config, sessionmaker)
 
 
+@router.message(F.text.in_(label_variants("admin_monthly_report")))
+async def admin_monthly_report_now(
+    message: Message,
+    config: BotConfig,
+    sessionmaker: async_sessionmaker,
+    coc_client: CocClient,
+) -> None:
+    if not is_admin(message.from_user.id, config):
+        await message.answer(
+            "Админ-панель доступна только администраторам.",
+            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+        )
+        return
+    notifier = NotificationService(message.bot, config, sessionmaker, coc_client)
+    await notifier.send_monthly_summary_now()
+    await message.answer("Месячный отчёт отправлен в общий чат.", reply_markup=admin_menu_reply())
+
+
 @router.message(Command("set_chat_notify"))
 async def admin_notify_menu_command(
     message: Message,

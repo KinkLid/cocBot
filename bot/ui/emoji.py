@@ -31,6 +31,7 @@ EMOJI = {
     "admin_whitelist": "✅",
     "admin_notify_chat": "🔔",
     "admin_notify": "🔔",
+    "admin_monthly_report": "📅",
     "blacklist_add": "➕",
     "blacklist_show": "📋",
     "blacklist_remove": "🗑",

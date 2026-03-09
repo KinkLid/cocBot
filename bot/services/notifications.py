@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 from aiogram import Bot
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from sqlalchemy import delete, select, update, or_
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -671,32 +671,21 @@ class NotificationService:
         await self._send_dm_notifications(dm_text, notify_type)
 
     async def _notify_cwl_end(self, season: str) -> None:
-        header = "<b>📅 Итоги месяца</b>"
-        sections = []
         tops = await self._collect_monthly_tops()
-        if tops.get("war_stars"):
-            sections.append(_format_top_list("🏆 ТОП звёзд (КВ+ЛВК)", tops["war_stars"], value_prefix="⭐️"))
-        else:
-            sections.append("🏆 ТОП звёзд (КВ+ЛВК): недостаточно данных, начнём собирать с этого месяца.")
-        if tops.get("donations"):
-            sections.append(_format_top_list("🤝 ТОП донатов войск", tops["donations"], value_prefix="🎁"))
-        else:
-            sections.append("🤝 ТОП донатов войск: недостаточно данных, начнём собирать с этого месяца.")
-        if tops.get("capital"):
-            sections.append(_format_top_list("🏗 ТОП вклада в столицу", tops["capital"], value_prefix="🪙"))
-        else:
-            sections.append("🏗 ТОП вклада в столицу: недостаточно данных, начнём собирать с этого месяца.")
-
+        text = _build_monthly_summary_text(tops)
         problem_rows = await self._collect_cwl_problem_summary()
         if problem_rows is not None:
-            sections.append(render_cwl_problem_summary(problem_rows))
-        text = "\n\n".join([header, *sections])
+            text = "\n\n".join([text, render_cwl_problem_summary(problem_rows)])
         await self._send_chat_notification(text, "monthly_summary")
         await self._send_dm_notifications("ЛВК завершена. Итоги опубликованы в общем чате.", "monthly_summary")
 
+    async def send_monthly_summary_now(self) -> None:
+        tops = await self._collect_monthly_tops()
+        text = _build_monthly_summary_text(tops)
+        await self._send_chat_notification(text, "monthly_summary")
+
     async def _collect_monthly_tops(self) -> dict[str, list[tuple[str, int]]]:
-        now = datetime.now(timezone.utc)
-        window_start = now - timedelta(days=30)
+        month_start, month_end = _month_bounds(datetime.now(timezone.utc))
         stats: dict[str, list[tuple[str, int]]] = {"war_stars": [], "donations": [], "capital": []}
         current_tags = await self._get_current_clan_member_tags()
 
@@ -707,65 +696,37 @@ class NotificationService:
                         models.WarMemberStats.player_tag,
                         models.WarMemberStats.player_name,
                         models.WarMemberStats.stars,
+                        models.War.end_at.label("war_at"),
                     )
                     .join(models.War, models.War.war_tag == models.WarMemberStats.war_tag)
-                    .where(
-                        or_(
-                            models.War.end_at >= window_start,
-                            models.War.start_at >= window_start,
-                        )
-                    )
                 )
             ).all()
-            if war_rows:
-                stars_totals: dict[str, dict[str, Any]] = defaultdict(lambda: {"name": "Игрок", "stars": 0})
-                for row in war_rows:
-                    tag = row.player_tag
-                    stars_totals[tag]["name"] = row.player_name
-                    stars_totals[tag]["stars"] += row.stars or 0
-                stats["war_stars"] = [
-                    (_format_member_label(tag, entry["name"], current_tags), entry["stars"])
-                    for tag, entry in stars_totals.items()
-                    if entry["stars"] > 0
-                ]
+            stats["war_stars"] = _sum_war_star_rows(war_rows, month_start, month_end, current_tags)
 
             snapshots = (
                 await session.execute(
                     select(models.MemberDailyStat)
-                    .where(models.MemberDailyStat.captured_at >= window_start)
+                    .where(
+                        models.MemberDailyStat.captured_at >= month_start,
+                        models.MemberDailyStat.captured_at < month_end,
+                    )
                     .order_by(models.MemberDailyStat.captured_at.asc())
                 )
             ).scalars().all()
-        per_member: dict[str, list[models.MemberDailyStat]] = defaultdict(list)
-        for snap in snapshots:
-            per_member[snap.player_tag].append(snap)
-        donation_rows: list[tuple[str, int]] = []
-        capital_rows: list[tuple[str, int]] = []
-        for tag, snaps in per_member.items():
-            if len(snaps) < 2:
-                continue
-            first = snaps[0]
-            last = snaps[-1]
-            donation_delta = (last.donations_total or 0) - (first.donations_total or 0)
-            if donation_delta > 0:
-                donation_rows.append(
-                    (
-                        _format_member_label(tag, last.player_name, current_tags),
-                        donation_delta,
-                    )
-                )
-            capital_delta = (last.capital_contributions_total or 0) - (first.capital_contributions_total or 0)
-            if capital_delta > 0:
-                capital_rows.append(
-                    (
-                        _format_member_label(tag, last.player_name, current_tags),
-                        capital_delta,
-                    )
-                )
-
-        stats["donations"] = sorted(donation_rows, key=lambda x: x[1], reverse=True)[:10]
-        stats["capital"] = sorted(capital_rows, key=lambda x: x[1], reverse=True)[:10]
-        stats["war_stars"] = sorted(stats["war_stars"], key=lambda x: x[1], reverse=True)[:10]
+        stats["donations"] = _aggregate_member_monthly_increments(
+            snapshots,
+            month_start,
+            month_end,
+            "donations_total",
+            current_tags,
+        )
+        stats["capital"] = _aggregate_member_monthly_increments(
+            snapshots,
+            month_start,
+            month_end,
+            "capital_contributions_total",
+            current_tags,
+        )
         return stats
 
     async def _get_current_clan_member_tags(self) -> set[str]:
@@ -1765,6 +1726,96 @@ def _build_war_progress_snapshot(war_data: dict[str, Any], clan_tag: str) -> str
     else:
         lines.append("Все атаки сделаны.")
     return "\n".join(lines)
+
+
+def _month_bounds(now: datetime) -> tuple[datetime, datetime]:
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if start.month == 12:
+        end = start.replace(year=start.year + 1, month=1)
+    else:
+        end = start.replace(month=start.month + 1)
+    return start, end
+
+
+def _sum_war_star_rows(
+    rows: list[Any],
+    month_start: datetime,
+    month_end: datetime,
+    current_tags: set[str],
+    limit: int = 10,
+) -> list[tuple[str, int]]:
+    totals: dict[str, dict[str, Any]] = defaultdict(lambda: {"name": "Игрок", "stars": 0})
+    for row in rows:
+        war_at = row.war_at
+        if not war_at:
+            continue
+        if war_at.tzinfo is None:
+            war_at = war_at.replace(tzinfo=timezone.utc)
+        if war_at < month_start or war_at >= month_end:
+            continue
+        totals[row.player_tag]["name"] = row.player_name
+        totals[row.player_tag]["stars"] += row.stars or 0
+    result = [
+        (_format_member_label(tag, item["name"], current_tags), item["stars"])
+        for tag, item in totals.items()
+        if item["stars"] > 0
+    ]
+    return sorted(result, key=lambda x: x[1], reverse=True)[:limit]
+
+
+def _aggregate_member_monthly_increments(
+    snapshots: list[Any],
+    month_start: datetime,
+    month_end: datetime,
+    value_attr: str,
+    current_tags: set[str],
+    limit: int = 10,
+) -> list[tuple[str, int]]:
+    grouped: dict[str, list[Any]] = defaultdict(list)
+    for snap in snapshots:
+        captured_at = snap.captured_at
+        if captured_at.tzinfo is None:
+            captured_at = captured_at.replace(tzinfo=timezone.utc)
+        if month_start <= captured_at < month_end:
+            grouped[snap.player_tag].append(snap)
+
+    rows: list[tuple[str, int]] = []
+    for tag, snaps in grouped.items():
+        snaps.sort(key=lambda item: item.captured_at)
+        previous: int | None = None
+        total = 0
+        name = snaps[-1].player_name
+        for snap in snaps:
+            value = getattr(snap, value_attr) or 0
+            if previous is None:
+                previous = value
+                continue
+            delta = value - previous
+            if delta > 0:
+                total += delta
+            previous = value
+        if total > 0:
+            rows.append((_format_member_label(tag, name, current_tags), total))
+    return sorted(rows, key=lambda x: x[1], reverse=True)[:limit]
+
+
+def _build_monthly_summary_text(tops: dict[str, list[tuple[str, int]]]) -> str:
+    sections = ["<b>📅 Итоги месяца</b>"]
+    if tops.get("war_stars"):
+        sections.append(_format_top_list("🏆 Лучшие по звёздам (КВ + ЛВК)", tops["war_stars"], value_prefix="⭐️"))
+    else:
+        sections.append("🏆 Лучшие по звёздам (КВ + ЛВК): пока нет данных за текущий месяц.")
+    if tops.get("capital"):
+        sections.append(_format_top_list("🏰 Лучшие по столице", tops["capital"], value_prefix="🪙"))
+    else:
+        sections.append("🏰 Лучшие по столице: пока нет данных за текущий месяц.")
+    if tops.get("donations"):
+        sections.append(_format_top_list("🎁 Лучшие по донатам", tops["donations"], value_prefix="🎁"))
+    else:
+        sections.append("🎁 Лучшие по донатам: пока нет данных за текущий месяц.")
+    return "\n\n".join(sections)
 
 
 def _format_member_label(tag: str, name: str, current_tags: set[str]) -> str:
