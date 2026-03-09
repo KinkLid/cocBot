@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from time import monotonic
 from datetime import datetime, timezone
 import html
 from zoneinfo import ZoneInfo
@@ -391,25 +392,37 @@ async def admin_panel_button(
     config: BotConfig,
     coc_client: CocClient,
 ) -> None:
+    start_ts = monotonic()
+    logger.info("admin_panel_click_received telegram_id=%s", message.from_user.id)
     await reset_state_if_any(state)
-    if not is_admin(message.from_user.id, config):
+    admin_ok = is_admin(message.from_user.id, config)
+    logger.info(
+        "admin_panel_guard_done telegram_id=%s duration_ms=%.2f admin=%s",
+        message.from_user.id,
+        (monotonic() - start_ts) * 1000,
+        admin_ok,
+    )
+    if not admin_ok:
         await message.answer(
             "Админ-панель доступна только администраторам.",
-            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
+            reply_markup=main_menu_reply(admin_ok),
         )
         return
     await reset_menu(state)
     await set_menu(state, "admin_menu")
-    try:
-        missed_label = await get_missed_attacks_label(coc_client, config.clan_tag)
-    except Exception:  # noqa: BLE001
-        logger.exception("Failed to open admin panel for telegram_id=%s", message.from_user.id)
-        await message.answer(
-            "Не удалось открыть админ-панель из-за внутренней ошибки. Попробуйте снова позже.",
-            reply_markup=main_menu_reply(is_admin(message.from_user.id, config)),
-        )
-        return
-    await message.answer("Админ-панель.", reply_markup=admin_menu_reply(missed_label))
+    menu_start_ts = monotonic()
+    markup = admin_menu_reply()
+    logger.info(
+        "admin_panel_menu_built telegram_id=%s duration_ms=%.2f",
+        message.from_user.id,
+        (monotonic() - menu_start_ts) * 1000,
+    )
+    await message.answer("Админ-панель.", reply_markup=markup)
+    logger.info(
+        "admin_panel_sent telegram_id=%s total_duration_ms=%.2f",
+        message.from_user.id,
+        (monotonic() - start_ts) * 1000,
+    )
 
 
 @router.message(Command("admin"))

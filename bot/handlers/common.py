@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from time import monotonic
 from datetime import datetime, timezone
 
 from aiogram import F, Router
@@ -27,7 +28,6 @@ from bot.texts.help import build_help_text
 from bot.texts.rules import build_rules_text
 from bot.ui.labels import label, label_variants, menu_text_actions
 from bot.utils.navigation import reset_menu, set_menu
-from bot.utils.war_state import get_missed_attacks_label
 from bot.utils.state import reset_state_if_any
 from bot.utils.chat_invite import build_main_chat_invite_text
 from bot.utils.telegram import build_bot_dm_keyboard, build_bot_dm_link, try_send_dm
@@ -457,23 +457,35 @@ async def menu_callbacks(
             ),
         )
     elif callback.data == "menu:admin":
-        if not is_admin(callback.from_user.id, config):
+        admin_panel_start_ts = monotonic()
+        logger.info("admin_panel_click_received telegram_id=%s source=menu_callback", callback.from_user.id)
+        admin_ok = is_admin(callback.from_user.id, config)
+        logger.info(
+            "admin_panel_guard_done telegram_id=%s source=menu_callback duration_ms=%.2f admin=%s",
+            callback.from_user.id,
+            (monotonic() - admin_panel_start_ts) * 1000,
+            admin_ok,
+        )
+        if not admin_ok:
             await callback.message.answer(
                 "Админ-панель доступна только администраторам.",
-                reply_markup=main_menu_reply(is_admin(callback.from_user.id, config)),
+                reply_markup=main_menu_reply(admin_ok),
             )
             return
         await set_menu(state, "admin_menu")
-        try:
-            missed_label = await get_missed_attacks_label(coc_client, config.clan_tag)
-        except Exception:  # noqa: BLE001
-            logger.exception("Failed to open admin panel from callback for telegram_id=%s", callback.from_user.id)
-            await callback.message.answer(
-                "Не удалось открыть админ-панель из-за внутренней ошибки. Попробуйте снова позже.",
-                reply_markup=main_menu_reply(is_admin(callback.from_user.id, config)),
-            )
-            return
-        await callback.message.answer("Админ-панель.", reply_markup=admin_menu_reply(missed_label))
+        menu_start_ts = monotonic()
+        markup = admin_menu_reply()
+        logger.info(
+            "admin_panel_menu_built telegram_id=%s source=menu_callback duration_ms=%.2f",
+            callback.from_user.id,
+            (monotonic() - menu_start_ts) * 1000,
+        )
+        await callback.message.answer("Админ-панель.", reply_markup=markup)
+        logger.info(
+            "admin_panel_sent telegram_id=%s source=menu_callback total_duration_ms=%.2f",
+            callback.from_user.id,
+            (monotonic() - admin_panel_start_ts) * 1000,
+        )
 
 
 @router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))

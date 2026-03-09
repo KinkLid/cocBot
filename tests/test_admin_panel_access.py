@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from bot.config import BotConfig
 from bot.handlers import admin as admin_handlers
+from bot.handlers import common as common_handlers
 from bot.services.guards import ClanAccessMiddleware
 from bot.ui.labels import label
 
@@ -22,6 +23,17 @@ class DummyMessage:
 
 class DummyState:
     pass
+
+
+class DummyCallback:
+    def __init__(self, user_id: int, data: str) -> None:
+        self.from_user = SimpleNamespace(id=user_id)
+        self.data = data
+        self.message = DummyMessage(user_id=user_id, text="")
+        self.answered = False
+
+    async def answer(self) -> None:
+        self.answered = True
 
 
 def make_config(*, admin_ids: set[int]) -> BotConfig:
@@ -53,6 +65,53 @@ def test_admin_button_opens_panel_in_private(monkeypatch) -> None:
     asyncio.run(admin_handlers.admin_panel_button(message, DummyState(), config, coc_client=object()))
 
     assert message.answers[-1]["text"] == "Админ-панель."
+
+
+def test_admin_button_does_not_fetch_war_state_on_open(monkeypatch) -> None:
+    message = DummyMessage(user_id=42, text=label("admin"), chat_type="private")
+    config = make_config(admin_ids={42})
+
+    async def _noop(*args, **kwargs):  # noqa: ANN002, ANN003
+        return None
+
+    async def _fail_if_called(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("war-state API should not be called when opening admin panel")
+
+    monkeypatch.setattr(admin_handlers, "reset_state_if_any", _noop)
+    monkeypatch.setattr(admin_handlers, "reset_menu", _noop)
+    monkeypatch.setattr(admin_handlers, "set_menu", _noop)
+    monkeypatch.setattr(admin_handlers, "get_missed_attacks_label", _fail_if_called)
+
+    asyncio.run(admin_handlers.admin_panel_button(message, DummyState(), config, coc_client=object()))
+
+    assert message.answers[-1]["text"] == "Админ-панель."
+
+
+def test_admin_menu_callback_does_not_fetch_war_state_on_open(monkeypatch) -> None:
+    callback = DummyCallback(user_id=42, data="menu:admin")
+    config = make_config(admin_ids={42})
+
+    async def _noop(*args, **kwargs):  # noqa: ANN002, ANN003
+        return None
+
+    monkeypatch.setattr(common_handlers, "reset_state_if_any", _noop)
+    monkeypatch.setattr(common_handlers, "reset_menu", _noop)
+    monkeypatch.setattr(common_handlers, "set_menu", _noop)
+    monkeypatch.setattr(common_handlers, "_get_user_profile", _noop)
+
+    asyncio.run(
+        common_handlers.menu_callbacks(
+            callback,
+            DummyState(),
+            config,
+            sessionmaker=object(),
+            bot_username="bot",
+            coc_client=object(),
+        )
+    )
+
+    assert callback.answered is True
+    assert callback.message.answers[-1]["text"] == "Админ-панель."
 
 
 def test_non_admin_button_gets_denied(monkeypatch) -> None:
