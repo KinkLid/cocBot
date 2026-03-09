@@ -30,6 +30,7 @@ LABELS = {
     "admin_whitelist": "Вайтлист игроков",
     "admin_notify_chat": "Уведомления (чат)",
     "admin_notify": "Уведомления",
+    "admin_monthly_report": "Отчёт за месяц",
     "blacklist_add": "Добавить в ЧС",
     "blacklist_show": "Показать ЧС",
     "blacklist_remove": "Удалить из ЧС",

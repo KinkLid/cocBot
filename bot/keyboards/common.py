@@ -135,6 +135,7 @@ def admin_menu_reply(missed_label: str | None = None) -> ReplyKeyboardMarkup:
         keyboard.append([KeyboardButton(text=missed_label)])
     keyboard.append([KeyboardButton(text=label("admin_notify_chat"))])
     keyboard.append([KeyboardButton(text=label("admin_notify"))])
+    keyboard.append([KeyboardButton(text=label("admin_monthly_report"))])
     keyboard.append([KeyboardButton(text=label("back"))])
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
